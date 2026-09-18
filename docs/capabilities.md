@@ -4,7 +4,10 @@ Reference: FAME.jl 0.3.2 at `30586743f1c1bed549841e0309410da0134f3014`.
 Three evidence levels are distinguished: *offline* (Python tests with the
 in-memory fake backend and the independent C shim), *native-verified* (the
 consolidated validation campaign passed on an installed FAME) and *planned*.
-Nothing in this table is native-verified yet; the campaign has not been run.
+Nothing in this table is native-verified yet. A first campaign established only
+that initialization, version, sentinel reads and a first finalization work and
+that the library initializes once per process; the dependent groups have not
+run.
 
 | Reference surface | Python status | Evidence | Native |
 |---|---|---|---|
@@ -12,7 +15,7 @@ Nothing in this table is native-verified yet; the campaign has not been run.
 | check_status / HLIError | Implemented as `check_status` / `FameError` | known/unknown codes retained; no native text by default | pending |
 | Probe diagnostics | Implemented | failure classes, OS numbers, presence-only symbols | discovery only |
 | CHLI ABI declarations | Candidate inventory | 37 functions, 15 globals, [per-function checklist](abi-checklist.md); shim exercises every call | pending header check |
-| version, init_chli, close_chli | Implemented as `initialize` / `version` / `finalize` / `reset` | single owner retained through a failed finalization, generations, failed startup, fork rejection, licensing environment, process-fixed library | pending |
+| version, init_chli, close_chli | Implemented as `initialize` / `version` / `finalize`; `reset` deliberately unsupported | one-shot per process (initialize once, finalization terminal, no restart in the same process), failed startup and failed finalization terminal, fork rejection, licensing environment, process-fixed library | lifecycle first/finalize observed on both hosts; restart rejected by contract, unverified otherwise |
 | FameDatabase, workdb, opendb, postdb, closedb! | Implemented as `Database`, `work_database`, `open_database`, `post`, `close` | seven modes, read-only default, explicit posting, handle validation inside the operation lock, failed close kept tracked, redacted names | pending |
 | FameObject, Period, quick_info | Implemented as `ObjectInfo`, `Period`, `quick_info` | class/type/frequency/range, 64-bit indices, date-valued types | pending |
 | listdb / ITEM filters | Implemented as `list_objects` | `?` and `^`, alias/class/type/frequency filters, 242-byte names, truncation error, cursor cleanup, documented ITEM normalization (not restoration) | pending |

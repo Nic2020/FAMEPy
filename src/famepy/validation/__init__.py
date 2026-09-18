@@ -114,28 +114,57 @@ def _wheel_identity(wheel: Path, package_dir: Path) -> dict[str, Any]:
     return identity
 
 
-def package_identity(wheel: Path | None, source_sha: str | None) -> dict[str, Any]:
+def classify_import(package_dir: Path, cwd: Path) -> dict[str, Any]:
+    """Classify where the imported package lives, without recording paths.
+
+    A *checkout* import is recognized structurally: the package sits in a
+    ``src`` directory next to a ``pyproject.toml`` (or directly beside one),
+    which is how a source tree looks and how an installed distribution never
+    looks. A *site-packages* import is recognized by its directory chain. The
+    working directory being an ancestor of the package (for example when the
+    campaign runs from a directory that contains its virtual environment) is
+    reported as an observation only and never counts as a checkout import.
+    """
+    checkout = (
+        package_dir.parent.name == "src"
+        and (package_dir.parent.parent / "pyproject.toml").is_file()
+    ) or (package_dir.parent / "pyproject.toml").is_file()
+    parts = {part.lower() for part in package_dir.parts}
+    site = ("site-packages" in parts or "dist-packages" in parts) and not checkout
+    try:
+        ancestor = package_dir.is_relative_to(cwd)
+    except ValueError:
+        ancestor = False
+    return {
+        "imported_from_checkout": checkout,
+        "imported_from_site_packages": site,
+        "working_directory_is_ancestor": ancestor,
+    }
+
+
+def package_identity(
+    wheel: Path | None,
+    source_sha: str | None,
+    *,
+    package_dir: Path | None = None,
+    cwd: Path | None = None,
+) -> dict[str, Any]:
     """Describe the imported package without revealing where it lives.
 
     ``source_sha`` must already be validated as a hexadecimal revision. When a
     wheel is given, its shipped sources are compared with the imported package.
+    ``package_dir`` and ``cwd`` are injectable for tests only.
     """
-    package_dir = Path(famepy.__file__).resolve().parent
+    package_dir = Path(famepy.__file__).resolve().parent if package_dir is None else package_dir
+    cwd = Path.cwd().resolve() if cwd is None else cwd
     digest = hashlib.sha256()
     for file in sorted(package_dir.rglob("*.py")):
         digest.update(file.relative_to(package_dir).as_posix().encode())
         digest.update(file.read_bytes())
-    checkout = Path.cwd().resolve()
-    try:
-        inside_cwd = package_dir.is_relative_to(checkout)
-    except ValueError:
-        inside_cwd = False
-    parts = {part.lower() for part in package_dir.parts}
     identity: dict[str, Any] = {
         "famepy_version": famepy.__version__,
         "package_sources_sha256": digest.hexdigest(),
-        "imported_from_site_packages": "site-packages" in parts or "dist-packages" in parts,
-        "imported_from_working_directory": inside_cwd,
+        **classify_import(package_dir, cwd),
         "source_sha": source_sha if source_sha and _SOURCE_SHA.fullmatch(source_sha) else None,
         "wheel_sha256": None,
         "wheel_name": None,
@@ -495,7 +524,9 @@ def run(options: dict[str, Any]) -> dict[str, Any]:
         blocked_reason = "library discovery or symbol probe did not succeed"
     if blocked_reason is None and not options.get("backend"):
         identity = report["preflight"]["identity"]
-        if not identity.get("imported_from_site_packages"):
+        if identity.get("imported_from_checkout") or not identity.get(
+            "imported_from_site_packages"
+        ):
             blocked_reason = "native validation requires an installed package"
         elif not identity.get("source_sha"):
             blocked_reason = "native validation requires a source revision"
@@ -542,6 +573,7 @@ __all__ = [
     "REQUIRED_CASES",
     "SCHEMA_VERSION",
     "abi_table_sha256",
+    "classify_import",
     "package_identity",
     "preflight",
     "reserve_scratch",

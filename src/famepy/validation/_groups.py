@@ -56,6 +56,7 @@ class Context:
         self.timeout = timeout
         self.julia = julia
         self.config = dict(config or {})
+        self.new_session: Callable[[], Session] = lambda: Session(native=session._native)
         self._first: int | None = None
 
     def path(self, name: str) -> Path:
@@ -76,7 +77,19 @@ class Context:
         """Spawn a verification child that reopens the database read-only."""
         manifest_path = self.path(f"{case_id}.manifest.json")
         manifest_path.write_text(json.dumps(manifest), encoding="ascii")
-        command = self.child_command(["--group", "verify", "--manifest", str(manifest_path)])
+        self._run_nested(case_id, ["--group", "verify", "--manifest", str(manifest_path)])
+
+    def fresh_process(self, case_id: str) -> None:
+        """Spawn a child that runs the one-shot lifecycle in a fresh process.
+
+        This is the supported fresh-runtime boundary; it is exercised after
+        the current child has finalized, proving that a new process (not a
+        restart) initializes again.
+        """
+        self._run_nested(case_id, ["--group", "fresh_process"])
+
+    def _run_nested(self, case_id: str, arguments: list[str]) -> None:
+        command = self.child_command(arguments)
         try:
             result = run_child(command, json.dumps(self.config), self.timeout, nested=True)
         except subprocess.TimeoutExpired:
@@ -231,12 +244,21 @@ LIFECYCLE_REQUIRED = (
     "version_is_positive",
     "sentinels_read",
     "sentinel_facts",
+    "reset_unsupported_while_active",
+    "still_initialized_after_reset_refusal",
     "finalize",
     "finalized_state",
-    "reinitialize",
-    "generation_after_reset",
-    "version_after_reset",
-    "finalize_again",
+    "finalize_again_harmless",
+    "reinitialize_rejected",
+    "new_wrapper_rejected",
+    "new_wrapper_untouched",
+    "reset_unsupported_after_finalize",
+    "operation_after_finalize_rejected",
+    "state_stays_finalized",
+    "fresh_process:initialize",
+    "fresh_process:version_is_positive",
+    "fresh_process:finalize",
+    "fresh_process:finalized_state",
 )
 
 
@@ -262,12 +284,47 @@ def group_lifecycle(ctx: Context) -> None:
         )
         r.fact("string_sentinel_lengths", lengths)
         r.fact("precision_sentinels_are_nan", all_nan)
+    # reset() is unsupported and must not touch an active runtime.
+    r.expect_error(
+        "reset_unsupported_while_active", session.reset, (famepy.UnsupportedOperationError,)
+    )
+    r.equal(
+        "still_initialized_after_reset_refusal",
+        [session.state, session.version() == version],
+        ["initialized", True],
+    )
+    # Finalization is terminal for this process: everything below must be
+    # rejected in Python before any native call.
     r.check("finalize", session.finalize)
     r.equal("finalized_state", session.state, "finalized")
-    r.check("reinitialize", session.initialize)
-    r.equal("generation_after_reset", session.generation, 2)
-    r.check("version_after_reset", session.version)
-    r.check("finalize_again", session.finalize)
+    r.check("finalize_again_harmless", session.finalize)
+    r.expect_error("reinitialize_rejected", session.initialize, (famepy.RuntimeStateError,))
+    other = ctx.new_session()
+    before = [other.state, other.is_loaded, other.is_initialized, other.generation]
+    r.expect_error("new_wrapper_rejected", other.initialize, (famepy.RuntimeStateError,))
+    r.equal(
+        "new_wrapper_untouched",
+        [other.state, other.is_loaded, other.is_initialized, other.generation],
+        before,
+    )
+    r.expect_error(
+        "reset_unsupported_after_finalize", session.reset, (famepy.UnsupportedOperationError,)
+    )
+    r.expect_error(
+        "operation_after_finalize_rejected", session.version, (famepy.RuntimeStateError,)
+    )
+    r.equal("state_stays_finalized", [session.state, session.generation], ["finalized", 1])
+    ctx.fresh_process("fresh_process")
+
+
+def group_fresh_process(ctx: Context) -> None:
+    """Minimal lifecycle in a child spawned after its parent finalized."""
+    session, r = ctx.session, ctx.recorder
+    r.check("initialize", session.initialize)
+    version = r.check("version", session.version)
+    r.equal("version_is_positive", version is not None and float(version) > 0, True)
+    r.check("finalize", session.finalize)
+    r.equal("finalized_state", session.state, "finalized")
 
 
 def _sentinel_facts(session: Session) -> dict[str, Any]:
@@ -307,7 +364,8 @@ DATABASE_REQUIRED = (
     "mode_overwrite_empties",
     "work_database_flow",
     "work_database",
-    "stale_handle_after_reset",
+    "stale_handle_after_finalize",
+    "stale_close_harmless",
     "finalize",
 )
 
@@ -398,16 +456,16 @@ def group_database(ctx: Context) -> None:
 
     r.equal("work_database", r.check("work_database_flow", workdb_flow), np.array([3.0]))
 
-    def stale_handle() -> None:
-        database = famepy.open_database(path, session=session)
-        session.reset()
-        try:
-            famepy.quick_info(database, "kept")
-        finally:
-            database.close()
-
-    r.expect_error("stale_handle_after_reset", stale_handle, (famepy.StaleHandleError,))
+    # Terminal: finalization invalidates handles; this is the last native step.
+    stale = famepy.open_database(path, session=session)
     r.check("finalize", session.finalize)
+    r.expect_error(
+        "stale_handle_after_finalize",
+        lambda: famepy.quick_info(stale, "kept"),
+        (famepy.StaleHandleError,),
+    )
+    r.check("stale_close_harmless", stale.close)
+    r.equal("stale_handle_closed", stale.is_open, False)
 
 
 # name, kind, series frequency name, date frequency name
@@ -910,6 +968,8 @@ GROUP_FUNCTIONS: dict[str, Callable[[Context], None]] = {
     "discovery": group_discovery,
     "commands": group_commands,
     "bridge": group_bridge,
+    # Not selectable from the command line: spawned by ``lifecycle``.
+    "fresh_process": group_fresh_process,
 }
 
 REQUIRED_CASES: dict[str, tuple[str, ...]] = {

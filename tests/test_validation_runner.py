@@ -194,6 +194,16 @@ def test_full_campaign_with_fake_backend_in_subprocesses(tmp_path, child_env):
         assert groups[name]["exit_code"] == 0
     ids = {case["id"] for case in groups["database"]["cases"]}
     assert {"cross_process_scalar:meta:kept", "cross_process_scalar:values:kept"} <= ids
+    assert {"stale_handle_after_finalize", "stale_close_harmless"} <= ids
+    lifecycle_ids = {case["id"] for case in groups["lifecycle"]["cases"]}
+    assert {
+        "reset_unsupported_while_active",
+        "reinitialize_rejected",
+        "new_wrapper_rejected",
+        "fresh_process:initialize",
+        "fresh_process:finalized_state",
+    } <= lifecycle_ids
+    assert not {"reinitialize", "generation_after_reset", "version_after_reset"} & lifecycle_ids
     julia = next(c for c in groups["bridge"]["cases"] if c["id"] == "julia_differential")
     assert julia["status"] == "unsupported"
     text = json.dumps(report)
@@ -243,6 +253,30 @@ def test_faulty_backends_cannot_produce_a_pass(
     statuses = {case["id"]: case["status"] for case in record["cases"]}
     assert statuses[failing] == "fail"
     assert failing in record.get("required_not_passed", [])
+
+
+def test_finite_sentinel_profile_passes_every_group(tmp_path, child_env):
+    """No group may assume floating missing values are NaNs."""
+    report = validation.run(
+        _options(tmp_path, "make_finite_sentinel_backend", ["lifecycle", "raw_matrix", "bridge"])
+    )
+    assert report["result"] == "PASS", json.dumps(report["groups"], indent=1)[:4000]
+    lifecycle = {case["id"]: case for case in report["groups"]["lifecycle"]["cases"]}
+    assert lifecycle["precision_sentinels_are_nan"]["actual"] is False
+    assert lifecycle["precision_sentinels_are_nan"]["observation"] is True
+
+
+def test_restart_requiring_child_payload_is_rejected(tmp_path, monkeypatch):
+    """A child reporting the old restart cases cannot satisfy the required set."""
+    cases = [{"id": "reinitialize", "status": "pass"}, {"id": "initialize", "status": "pass"}]
+
+    def fake_run_child(command, input_text, timeout, **kwargs):
+        return Completed(0, json.dumps({"group": "lifecycle", "cases": cases, "counts": {}}))
+
+    monkeypatch.setattr(validation, "run_child", fake_run_child)
+    report = validation.run(_options(tmp_path, "make_validation_backend", ["lifecycle"]))
+    assert report["result"] == "FAIL"
+    assert "fresh_process:initialize" in report["groups"]["lifecycle"]["required_missing"]
 
 
 def test_timeout_terminates_a_hanging_child(tmp_path, child_env):
@@ -476,3 +510,37 @@ def test_wheel_identity_compares_shipped_sources(tmp_path):
         validation.package_identity(tmp_path / "missing.whl", None)["wheel_error"] == "unreadable"
     )
     assert len(validation.abi_table_sha256()) == 64
+
+
+def _synthetic_package(base):
+    base.mkdir(parents=True)
+    (base / "__init__.py").write_text("x = 1")
+    return base
+
+
+def test_import_classification_uses_structure_not_ancestry(tmp_path):
+    classify = validation.classify_import
+    checkout = _synthetic_package(tmp_path / "repo" / "src" / "famepy")
+    (tmp_path / "repo" / "pyproject.toml").write_text("[project]")
+    installed = _synthetic_package(tmp_path / "env" / "lib" / "site-packages" / "famepy")
+    flat = _synthetic_package(tmp_path / "flat" / "famepy")
+    (tmp_path / "flat" / "pyproject.toml").write_text("[project]")
+    # An actual checkout is rejected wherever the campaign runs from.
+    facts = classify(checkout, tmp_path / "elsewhere")
+    assert facts["imported_from_checkout"] and not facts["imported_from_site_packages"]
+    assert classify(flat, tmp_path)["imported_from_checkout"]
+    # A normal installed import passes.
+    facts = classify(installed, tmp_path / "elsewhere")
+    assert facts == {
+        "imported_from_checkout": False,
+        "imported_from_site_packages": True,
+        "working_directory_is_ancestor": False,
+    }
+    # The working directory being an ancestor of the environment is only an observation.
+    facts = classify(installed, tmp_path)
+    assert facts["working_directory_is_ancestor"] is True
+    assert facts["imported_from_site_packages"] and not facts["imported_from_checkout"]
+    identity = validation.package_identity(None, "abc1234", package_dir=installed, cwd=tmp_path)
+    assert identity["imported_from_site_packages"] and not identity["imported_from_checkout"]
+    assert identity["working_directory_is_ancestor"] is True
+    assert len(identity["package_sources_sha256"]) == 64

@@ -10,17 +10,21 @@ commands must be ASCII `str` values or NUL-free `bytes` in this release.
 ```python
 import famepy
 
-session = famepy.initialize()  # one initialized owner per process
+session = famepy.initialize()  # one initialized owner per process, once
 print(famepy.version())  # library version as a float
-famepy.reset()  # finalize and initialize again; handles become stale
-famepy.finalize()
+famepy.finalize()  # terminal for this process; handles become stale
 ```
 
-`initialize` is idempotent. A runtime inherited across `fork` is refused; use
-spawned processes. A failed initialization leaves the runtime retryable and
-keeps the numeric status on the `FameError`. A failed finalization keeps the
-session as the process owner until `finalize()` is retried successfully. The
-library is fixed for the process once loaded.
+`initialize` is idempotent while active. CHLI initializes once per process
+and finalization is terminal: after `finalize()` nothing in the same process
+can initialize again (not another session, not a new wrapper, not another
+library), and `famepy.reset()` raises `UnsupportedOperationError` without
+touching the runtime. Start a spawned process for a fresh runtime; a runtime
+inherited across `fork` is refused. A failed native initialization is
+terminal too and keeps the numeric status on the `FameError`; only checks
+that happen before the native call (such as a missing `FAME` environment
+variable) leave the session retryable. The library is fixed for the process
+once loaded.
 
 ## Databases
 

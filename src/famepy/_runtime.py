@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: MIT
-"""Process-owned library loader and the single initialized CHLI session.
+"""Process-owned library loader and the single, one-shot CHLI session.
 
-One process holds at most one initialized CHLI owner. Every operation runs
-under one reentrant lock for its whole duration, because work databases, ITEM
-options, wildcard cursors, output redirection and the extended error state are
-process-global inside the library. A runtime inherited across ``fork`` is
-refused, even through a freshly created wrapper, because the child inherits
-initialized native state it cannot safely use; use ``spawn``.
+CHLI initializes once per process and its finalization is the last native
+call the process may make. The package therefore models one owner per
+process with a terminal lifecycle: ``created`` -> ``loaded`` ->
+``initialized`` -> ``finalized``. Initialization is idempotent while active.
+Once ``cfmini`` has been attempted, no other session, no new wrapper and no
+other library candidate can initialize in this process; a spawned process is
+the supported fresh-runtime boundary. ``reset()`` is unsupported and raises
+before touching anything.
 
-Ownership is released only by a successful finalization. When ``cfmfin``
-fails, the session becomes ``broken`` and keeps the process ownership, so no
-other session can initialize until a retried finalization succeeds. The
-native library is fixed for the process lifetime once loaded: no unload is
-attempted and no second library can be chosen in the same process.
+Every operation runs under one reentrant lock for its whole duration,
+because work databases, ITEM options, wildcard cursors, output redirection
+and the extended error state are process-global inside the library. A
+runtime inherited across ``fork`` is refused, even through a freshly created
+wrapper, because the child inherits initialized native state it cannot safely
+use; use ``spawn``. The native library is fixed for the process lifetime once
+loaded: no unload is attempted.
 """
 
 from __future__ import annotations
@@ -44,8 +48,18 @@ LOCK = threading.RLock()
 # Set in a forked child when the parent had loaded or initialized native state.
 _INHERITED = False
 _LOADED_NATIVE = False
+# The session that attempted cfmini in this process. It is never cleared by a
+# finalization: ownership is terminal because the library is one-shot.
 _OWNER: Session | None = None
 _DEFAULT: Session | None = None
+
+# States after which this process can never initialize CHLI again.
+TERMINAL_STATES = ("finalized", "broken", "failed")
+
+_ONE_SHOT = (
+    "CHLI initializes once per process and finalization is terminal; start a spawned "
+    "process for a fresh runtime."
+)
 
 
 def _after_fork() -> None:
@@ -130,12 +144,15 @@ class ExtendedErrorRetrieval:
 
 
 class Session:
-    """The process-wide initialized CHLI owner.
+    """The process-wide, one-shot CHLI owner.
 
-    States: ``created`` -> ``loaded`` -> ``initialized`` <-> ``finalized``; a
-    failed finalization leaves ``broken`` and keeps process ownership. Each
-    initialization increments the generation so that database handles from
-    earlier generations are stale.
+    States: ``created`` -> ``loaded`` -> ``initialized`` -> ``finalized``.
+    Two further terminal states exist: ``failed`` when ``cfmini`` itself
+    failed or was interrupted, and ``broken`` when a ``cfmfin`` (during
+    finalization or cleanup after a setup failure) failed or was interrupted. No terminal
+    state permits another native lifecycle call in this process. Python-level
+    checks before ``cfmini`` (licensing environment, ownership) leave the
+    session ``loaded`` and retryable because nothing native was consumed.
     """
 
     def __init__(
@@ -166,6 +183,8 @@ class Session:
         self.extended_error_retrieval: ExtendedErrorRetrieval | None = None
         self.extended_error_capture_failure: str | None = None
         self.last_cleanup_statuses: tuple[int, ...] = ()
+        # Status of cfmfin, or None if not attempted or interrupted without a status.
+        self.finalize_status: int | None = None
 
     # -- state ------------------------------------------------------------
 
@@ -175,6 +194,7 @@ class Session:
 
     @property
     def generation(self) -> int:
+        """0 before the single initialization, 1 after it."""
         return self._generation
 
     @property
@@ -184,6 +204,10 @@ class Session:
     @property
     def is_initialized(self) -> bool:
         return self._state == "initialized"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self._state in TERMINAL_STATES
 
     @property
     def sentinels(self) -> Sentinels:
@@ -218,21 +242,24 @@ class Session:
             return self._native
 
     def initialize(self) -> Session:
-        """Initialize CHLI once per process; idempotent while initialized."""
+        """Initialize CHLI once per process; idempotent while initialized.
+
+        Every rejection below happens before any native call. After the
+        process has attempted ``cfmini`` through any session, no session can
+        initialize again.
+        """
         global _OWNER
         self._check_process()
         with LOCK:
             if self._state == "initialized":
                 return self
-            if self._state == "broken":
-                raise RuntimeStateError(
-                    "A failed finalization left this runtime unusable; retry finalize() first."
-                )
+            if self._state in TERMINAL_STATES:
+                raise RuntimeStateError(f"This session is {self._state}. {_ONE_SHOT}")
             if _OWNER is not None and _OWNER is not self:
-                if _OWNER.state == "broken":
+                if _OWNER.is_terminal:
                     raise RuntimeStateError(
-                        "The process runtime owner failed to finalize and still owns CHLI; "
-                        "retry famepy.finalize() before initializing another session."
+                        f"The process already used its CHLI runtime (owner is "
+                        f"{_OWNER.state}). {_ONE_SHOT}"
                     )
                 raise RuntimeStateError("Another session already owns the initialized runtime.")
             native = self.load()
@@ -243,33 +270,39 @@ class Session:
                         "Set the FAME environment variable to the installation before "
                         "initialization; the library requires it for licensing."
                     )
-            native.initialize()
-            self._generation += 1
-            self._state = "initialized"
+            # From here the process has consumed its single initialization.
             _OWNER = self
+            # Mark consumed before crossing the native boundary, including interrupts.
+            self._state = "failed"
+            native.initialize()
+            self._generation = 1
+            self._state = "initialized"
             try:
                 self._sentinels = native.sentinels()
-            except Exception:
-                self._teardown(native)
+            except BaseException as failure:
+                self._teardown(native, failure)
                 raise
             return self
 
-    def _teardown(self, native: NativeInterface) -> None:
+    def _teardown(self, native: NativeInterface, failure: BaseException) -> None:
         """Cleanup after a failure that followed a successful cfmini.
 
-        A failed cfmfin keeps process ownership (state ``broken``) so that no
-        other session can initialize over a possibly still-active library.
+        The process cannot be made reusable: one ``cfmfin`` is attempted as
+        the terminal call and its status recorded; the original failure is
+        what propagates. A failed ``cfmfin`` leaves ``broken``; no further
+        native recovery call is ever issued.
         """
-        global _OWNER
         self._sentinels = None
+        self._state = "broken"
         try:
             native.finalize()
-        except FameError:
-            self._state = "broken"
+        except BaseException as error:
+            if isinstance(error, FameError):
+                self.finalize_status = error.status
+            failure.__notes__ = [*getattr(failure, "__notes__", []), "cleanup cfmfin failed"]
             return
+        self.finalize_status = 0
         self._state = "finalized"
-        if _OWNER is self:
-            _OWNER = None
 
     def version(self) -> float:
         with self.operation("version") as native:
@@ -280,21 +313,13 @@ class Session:
     def finalize(self) -> None:
         """Close tracked databases, finalize CHLI and invalidate all handles.
 
-        Ownership is released only when cfmfin succeeds. A failure leaves the
-        session ``broken`` and still owning the process; calling finalize()
-        again retries cfmfin.
+        ``cfmfin`` is issued at most once per process. A failure leaves the
+        session ``broken`` (terminal) and is not retried. Calling
+        ``finalize()`` in any terminal or never-initialized state is a
+        harmless Python-level no-op.
         """
-        global _OWNER
         self._check_process()
         with LOCK:
-            if self._state == "broken":
-                native = self._native
-                assert native is not None
-                native.finalize()
-                self._state = "finalized"
-                if _OWNER is self:
-                    _OWNER = None
-                return
             if self._state != "initialized":
                 return
             native = self._native
@@ -311,20 +336,23 @@ class Session:
             self.last_cleanup_statuses = tuple(statuses)
             self._version = None
             self._sentinels = None
+            self._state = "broken"
             try:
                 native.finalize()
-            except FameError:
+            except FameError as error:
+                self.finalize_status = error.status
                 self._state = "broken"
                 raise
+            self.finalize_status = 0
             self._state = "finalized"
-            if _OWNER is self:
-                _OWNER = None
 
     def reset(self) -> Session:
-        """Finalize and initialize again; existing database handles become stale."""
-        with LOCK:
-            self.finalize()
-            return self.initialize()
+        """Unsupported: CHLI cannot be restarted inside one process.
+
+        Raises UnsupportedOperationError before finalizing or mutating
+        anything. Use a spawned process for a fresh runtime.
+        """
+        raise UnsupportedOperationError(f"reset() is not supported. {_ONE_SHOT}")
 
     # -- operations -------------------------------------------------------
 
@@ -338,6 +366,10 @@ class Session:
         self._check_process()
         with LOCK:
             if self._state != "initialized" or self._native is None:
+                if self._state in TERMINAL_STATES:
+                    raise RuntimeStateError(
+                        f"Cannot run {name}: the runtime is {self._state}. {_ONE_SHOT}"
+                    )
                 raise RuntimeStateError(f"CHLI must be initialized before {name}.")
             try:
                 yield self._native
@@ -403,6 +435,12 @@ class Session:
 # -- module-level convenience -------------------------------------------
 
 
+def _check_process_unused(what: str) -> None:
+    """Refuse a new candidate once the process has used its runtime."""
+    if _OWNER is not None and _OWNER.is_terminal:
+        raise RuntimeStateError(f"Cannot {what}: the process already used its runtime. {_ONE_SHOT}")
+
+
 def default_session(
     library: str | os.PathLike[str] | None = None,
     *,
@@ -411,12 +449,16 @@ def default_session(
     """Return the process default session, discovering the library once.
 
     The library is fixed for the process lifetime once loaded; a different
-    library can only be chosen while nothing has been loaded yet.
+    library can only be chosen while nothing has been loaded yet, and never
+    after the process has used its one-shot runtime.
     """
     global _DEFAULT
     _check_not_inherited()
     with LOCK:
+        if library is not None or root is not None:
+            _check_process_unused("choose a library")
         if _DEFAULT is None or _DEFAULT._pid != os.getpid():
+            _check_process_unused("create the default session")
             _DEFAULT = Session(discover(library, root=root))
         elif library is not None or root is not None:
             if _DEFAULT.is_loaded:
@@ -433,8 +475,13 @@ def initialize(
     *,
     root: str | os.PathLike[str] | None = None,
 ) -> Session:
-    """Discover, load and initialize the process default session."""
+    """Discover, load and initialize the process default session (once)."""
+    _check_not_inherited()
     with LOCK:
+        if _OWNER is not None and _OWNER.is_terminal:
+            raise RuntimeStateError(
+                f"The process already used its CHLI runtime ({_OWNER.state}). {_ONE_SHOT}"
+            )
         if _OWNER is not None and (_DEFAULT is None or _OWNER is not _DEFAULT):
             raise RuntimeStateError("Another session already owns the initialized runtime.")
         if _DEFAULT is not None and _DEFAULT.state == "initialized":
@@ -448,23 +495,28 @@ def initialize(
 
 
 def current_session() -> Session:
-    """Return the process owner (initialized, or broken awaiting finalization) or raise."""
+    """Return the initialized owner, or raise when none is usable."""
     _check_not_inherited()
     with LOCK:
         if _OWNER is None:
             raise RuntimeStateError("No session is initialized; call famepy.initialize().")
+        if _OWNER.is_terminal:
+            raise RuntimeStateError(
+                f"The process runtime is {_OWNER.state}; no session is usable. {_ONE_SHOT}"
+            )
         return _OWNER
 
 
 def finalize() -> None:
+    """Finalize the process owner; harmless when there is none or it is terminal."""
     with LOCK:
         if _OWNER is not None:
             _OWNER.finalize()
 
 
 def reset() -> Session:
-    with LOCK:
-        return current_session().reset()
+    """Unsupported: raises UnsupportedOperationError without touching the runtime."""
+    raise UnsupportedOperationError(f"reset() is not supported. {_ONE_SHOT}")
 
 
 def version() -> float:
@@ -472,7 +524,11 @@ def version() -> float:
 
 
 def _reset_module_state_for_tests() -> None:
-    """Forget the default and owner references (test isolation only)."""
+    """Forget the default and owner references (test isolation only).
+
+    This simulates a fresh process between tests. It is not part of the
+    public API and does not make a real library initializable again.
+    """
     global _DEFAULT, _OWNER, _INHERITED, _LOADED_NATIVE
     with LOCK:
         _DEFAULT = None

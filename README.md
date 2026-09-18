@@ -43,10 +43,10 @@ import famepy
 from famepy import bridge
 from tsecon import TSeries, mm
 
-famepy.initialize()
+famepy.initialize()  # once per process
 bridge.write_tseries("synthetic.db", "ts", TSeries(mm(2020, 1), [1.0, 2.0]), mode="create")
 print(bridge.read_tseries("synthetic.db", "ts"))
-famepy.finalize()
+famepy.finalize()  # terminal; use a new process for another runtime
 ```
 
 See [usage](docs/usage.md), [contracts](docs/contracts.md),

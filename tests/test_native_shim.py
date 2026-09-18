@@ -328,6 +328,29 @@ def test_numeric_scalar_bits_survive_the_shim(db, session):
     assert isinstance(session.sentinels.numeric_nc, np.float32)
 
 
+def test_one_shot_lifecycle_against_the_shim(native, library):
+    """The shim, like the library, initializes once and treats cfmfin as terminal."""
+    first = Session(native=native).initialize()
+    first.finalize()
+    assert helper(library, "shim_initialized")() == 0
+    assert helper(library, "shim_fin_count")() == 1
+    with pytest.raises(famepy.RuntimeStateError, match="spawned process"):
+        first.initialize()
+    with pytest.raises(famepy.RuntimeStateError, match="spawned process"):
+        Session(native=CtypesNative(library)).initialize()
+    with pytest.raises(famepy.UnsupportedOperationError):
+        first.reset()
+    assert helper(library, "shim_init_count")() == 1
+    first.finalize()
+    assert helper(library, "shim_fin_count")() == 1
+    # Independently of the package guard, the shim itself refuses a restart.
+    status = ct.c_int32(-1)
+    library.cfmini(ct.byref(status))
+    assert status.value == 3
+    library.cfmfin(ct.byref(status))
+    assert status.value == 3
+
+
 def test_broken_owner_blocks_a_second_wrapper_on_the_same_library(native, library):
     first = Session(native=native).initialize()
     helper(library, "shim_fail_next", None, [ct.c_int32])(55)
@@ -337,5 +360,23 @@ def test_broken_owner_blocks_a_second_wrapper_on_the_same_library(native, librar
     with pytest.raises(famepy.RuntimeStateError):
         Session(native=CtypesNative(library)).initialize()
     assert helper(library, "shim_init_count")() == 1
-    first.finalize()
-    assert helper(library, "shim_initialized")() == 0
+    first.finalize()  # no second cfmfin without vendor evidence that it is safe
+    assert helper(library, "shim_initialized")() == 1
+    assert helper(library, "shim_fin_count")() == 0
+    assert first.state == "broken"
+
+
+def test_native_lifecycle_runner_uses_unloaded_wrapper_and_fresh_child(tmp_path, monkeypatch):
+    from famepy import validation
+
+    configured = os.environ.get("FAMEPY_TEST_SHIM")
+    if not configured:
+        if os.environ.get("FAMEPY_REQUIRE_SHIM") == "1":
+            pytest.fail("Required C shim is not configured.")
+        pytest.skip("Set FAMEPY_TEST_SHIM to run independent C-library tests.")
+    monkeypatch.setenv("FAME", "synthetic")
+    report = validation._run_child("lifecycle", {"library": configured, "timeout": 30}, tmp_path)
+    assert report["status"] == "pass", report
+    cases = {case["id"]: case for case in report["cases"]}
+    assert cases["new_wrapper_untouched"]["actual"] == ["created", False, False, 0]
+    assert cases["fresh_process:finalized_state"]["status"] == "pass"

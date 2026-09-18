@@ -27,21 +27,42 @@ def _retrieval():
     )
 
 
-def test_initialize_is_idempotent_and_generation_increments(fake):
+def test_initialize_is_idempotent_and_one_shot(fake):
     owner = Session(native=fake)
-    assert owner.state == "loaded"
+    assert owner.state == "loaded" and owner.generation == 0
     assert owner.initialize() is owner
     assert owner.initialize() is owner
     assert fake.fake.init_count == 1
     assert owner.generation == 1
     assert owner.version() == 11.8
-    owner.reset()
-    assert owner.generation == 2
-    assert fake.fake.init_count == 2 and fake.fake.fin_count == 1
     owner.finalize()
+    assert owner.state == "finalized" and owner.is_terminal
+    assert owner.finalize_status == 0
+    owner.finalize()  # harmless Python-level no-op: cfmfin is issued once
+    assert fake.fake.fin_count == 1 and fake.fake.calls.count("cfmfin") == 1
+    with pytest.raises(RuntimeStateError, match="spawned process"):
+        owner.initialize()
+    assert fake.fake.calls.count("cfmini") == 1
+    assert owner.generation == 1
+
+
+def test_reset_is_unsupported_and_never_touches_the_runtime(fake):
+    owner = Session(native=fake)
+    with pytest.raises(UnsupportedOperationError, match="reset"):
+        owner.reset()
+    assert owner.state == "loaded" and fake.fake.calls == []
+    owner.initialize()
+    fake.fake.calls.clear()
+    with pytest.raises(UnsupportedOperationError, match="spawned process"):
+        owner.reset()
+    with pytest.raises(UnsupportedOperationError):
+        famepy.reset()
+    assert owner.state == "initialized" and fake.fake.calls == []
+    assert owner.version() == 11.8
     owner.finalize()
-    assert owner.state == "finalized"
-    assert fake.fake.fin_count == 2
+    with pytest.raises(UnsupportedOperationError):
+        owner.reset()
+    assert fake.fake.fin_count == 1 and fake.fake.init_count == 1
 
 
 def test_sentinels_only_after_initialization(fake):
@@ -57,55 +78,95 @@ def test_sentinels_only_after_initialization(fake):
         _ = owner.sentinels
 
 
-def test_failed_startup_leaves_runtime_retryable(fake):
+def test_pre_native_failures_do_not_consume_initialization(tmp_path, monkeypatch):
+    path = tmp_path / "chli.dll"
+    path.touch()
+    fake = make_fake()
+    monkeypatch.setattr(_runtime, "CtypesNative", lambda library: fake)
+    monkeypatch.setattr(ct, "CDLL", lambda p: object())
+    owner = Session(discover(path), environ={})
+    with pytest.raises(LicensingConfigurationError):
+        owner.initialize()
+    assert owner.state == "loaded" and _runtime._OWNER is None
+    assert fake.fake.calls == []
+    # The same process may still initialize once the environment is fixed.
+    owner._environ = {"FAME": "x"}
+    owner.initialize()
+    assert owner.is_initialized and fake.fake.init_count == 1
+    owner.finalize()
+
+
+def test_failed_native_initialization_is_terminal(fake):
     fake.fake.fail_next["cfmini"] = 97
     owner = Session(native=fake)
     with pytest.raises(FameError) as error:
         owner.initialize()
     assert error.value.status == 97
-    assert owner.state == "loaded"
-    assert _runtime._OWNER is None
-    owner.initialize()
-    assert owner.is_initialized
+    assert owner.state == "failed" and owner.is_terminal
+    assert _runtime._OWNER is owner
+    with pytest.raises(RuntimeStateError, match="failed"):
+        owner.initialize()
+    with pytest.raises(RuntimeStateError):
+        Session(native=fake).initialize()
+    with pytest.raises(RuntimeStateError):
+        famepy.initialize()
+    assert fake.fake.calls.count("cfmini") == 1
+    owner.finalize()  # harmless; no cfmfin is issued for a never-initialized library
+    assert "cfmfin" not in fake.fake.calls
 
 
-def test_failure_after_cfmini_is_torn_down(fake, monkeypatch):
+def test_setup_failure_after_cfmini_is_terminal_with_one_cleanup_cfmfin(fake, monkeypatch):
     owner = Session(native=fake)
     monkeypatch.setattr(
         fake.fake, "sentinels", lambda: (_ for _ in ()).throw(FakeStatus(S_NOT_INITIALIZED))
     )
-    with pytest.raises(FameError):
+    with pytest.raises(FameError) as error:
         owner.initialize()
-    assert owner.state == "finalized"
-    assert fake.fake.initialized is False
-    assert _runtime._OWNER is None
+    assert error.value.status == S_NOT_INITIALIZED
+    assert owner.state == "finalized" and owner.finalize_status == 0
+    assert fake.fake.initialized is False and fake.fake.fin_count == 1
+    assert _runtime._OWNER is owner
+    with pytest.raises(RuntimeStateError):
+        owner.initialize()
+    with pytest.raises(RuntimeStateError):
+        Session(native=make_fake()).initialize()
+    owner.finalize()
+    assert fake.fake.calls.count("cfmfin") == 1
 
 
-def test_startup_cleanup_failure_retains_ownership(fake, monkeypatch):
+def test_setup_cleanup_failure_is_broken_and_keeps_the_original_error(fake, monkeypatch):
     owner = Session(native=fake)
     monkeypatch.setattr(
         fake.fake, "sentinels", lambda: (_ for _ in ()).throw(FakeStatus(S_NOT_INITIALIZED))
     )
     fake.fake.fail_next["cfmfin"] = 55
-    with pytest.raises(FameError):
+    with pytest.raises(FameError) as error:
         owner.initialize()
-    assert owner.state == "broken" and _runtime._OWNER is owner
-    assert fake.fake.initialized is True
-    with pytest.raises(RuntimeStateError, match="owner"):
+    assert error.value.status == S_NOT_INITIALIZED  # the setup failure, not the cleanup
+    assert "cleanup cfmfin failed" in getattr(error.value, "__notes__", [])
+    assert owner.state == "broken" and owner.finalize_status == 55
+    assert _runtime._OWNER is owner
+    with pytest.raises(RuntimeStateError, match="broken"):
+        owner.initialize()
+    with pytest.raises(RuntimeStateError, match="spawned process"):
         Session(native=make_fake()).initialize()
     owner.finalize()
-    assert owner.state == "finalized" and _runtime._OWNER is None
-    assert fake.fake.initialized is False
+    famepy.finalize()
+    assert fake.fake.calls.count("cfmfin") == 1
+    assert owner.state == "broken"
 
 
-def test_single_owner_per_process(fake):
+def test_single_owner_per_process_even_after_finalization(fake):
     first = Session(native=fake).initialize()
     second = Session(native=make_fake())
     with pytest.raises(RuntimeStateError, match="owns"):
         second.initialize()
     first.finalize()
-    second.initialize()
-    second.finalize()
+    with pytest.raises(RuntimeStateError, match="spawned process"):
+        second.initialize()
+    assert second.state == "loaded" and second._native.fake.calls == []
+    with pytest.raises(RuntimeStateError, match="spawned process"):
+        famepy.current_session()
 
 
 def test_double_native_initialization_is_a_status(fake):
@@ -120,16 +181,20 @@ def test_finalize_closes_databases_and_invalidates_handles(session, tmp_path):
     database = famepy.open_database(tmp_path / "a.db", "create", session=session)
     work = famepy.work_database(session=session)
     assert len(session.open_databases) == 2
-    session.reset()
+    session.finalize()
     assert not database.is_open and not work.is_open
-    with pytest.raises(StaleHandleError):
+    with pytest.raises(StaleHandleError, match="finalized"):
         database.post()
     with pytest.raises(StaleHandleError):
         famepy.quick_info(database, "x")
+    with pytest.raises(StaleHandleError):
+        with database:
+            pass
     database.close()
     assert session.last_cleanup_statuses == ()
-    fresh = famepy.work_database(session=session)
-    assert fresh is not work and fresh.is_open
+    with pytest.raises(RuntimeStateError):
+        famepy.work_database(session=session)
+    assert session._native.fake.calls.count("cfmcldb") == 2
 
 
 def test_finalize_records_close_failures(session, tmp_path):
@@ -140,34 +205,30 @@ def test_finalize_records_close_failures(session, tmp_path):
     assert not database.is_open
 
 
-def test_broken_finalization_retains_ownership_until_a_retry_succeeds(fake):
+def test_broken_finalization_is_terminal_and_never_retried(fake):
     owner = Session(native=fake).initialize()
     fake.fake.fail_next["cfmfin"] = 55
-    with pytest.raises(FameError):
+    with pytest.raises(FameError) as error:
         owner.finalize()
-    assert owner.state == "broken" and _runtime._OWNER is owner
-    assert fake.fake.initialized is True
-    with pytest.raises(RuntimeStateError, match="retry"):
+    assert error.value.status == 55
+    assert owner.state == "broken" and owner.finalize_status == 55
+    assert _runtime._OWNER is owner
+    with pytest.raises(RuntimeStateError, match="broken"):
         owner.initialize()
-    # A second wrapper over the SAME backend is stopped by the Python guard,
-    # before it can reach cfmini on a library that is still initialized.
     other = Session(native=fake)
-    with pytest.raises(RuntimeStateError, match="owner"):
+    with pytest.raises(RuntimeStateError, match="spawned process"):
         other.initialize()
-    assert fake.fake.init_count == 1
     with pytest.raises(RuntimeStateError):
         famepy.initialize()
-    assert famepy.current_session() is owner
-    fake.fake.fail_next["cfmfin"] = 56
-    with pytest.raises(FameError):
-        famepy.finalize()
-    assert owner.state == "broken" and _runtime._OWNER is owner
+    with pytest.raises(RuntimeStateError, match="broken"):
+        famepy.current_session()
+    with pytest.raises(RuntimeStateError, match="broken"):
+        owner.version()
+    # Repeated Python-level cleanup is harmless and issues no second cfmfin.
+    owner.finalize()
     famepy.finalize()
-    assert owner.state == "finalized" and _runtime._OWNER is None
-    assert fake.fake.initialized is False
-    other.initialize()
-    assert other.is_initialized and famepy.current_session() is other
-    other.finalize()
+    assert fake.fake.calls.count("cfmfin") == 1 and fake.fake.init_count == 1
+    assert owner.state == "broken"
 
 
 def test_inherited_process_is_rejected_even_for_new_wrappers(fake, monkeypatch):
@@ -258,10 +319,26 @@ def test_module_level_api(fake, monkeypatch, tmp_path):
     with pytest.raises(RuntimeStateError):
         famepy.initialize(tmp_path / "other.dll")
     assert famepy.version() == 11.8
-    assert famepy.reset() is owner and owner.generation == 2
+    with pytest.raises(UnsupportedOperationError):
+        famepy.reset()
+    assert owner.is_initialized and owner.generation == 1
     famepy.finalize()
     assert owner.state == "finalized"
     famepy.finalize()
+    fake.fake.calls.clear()
+    with pytest.raises(RuntimeStateError, match="spawned process"):
+        famepy.initialize()
+    with pytest.raises(RuntimeStateError, match="spawned process"):
+        famepy.initialize(path)
+    other = tmp_path / "other.dll"
+    other.touch()
+    with pytest.raises(RuntimeStateError, match="spawned process"):
+        famepy.initialize(other)
+    with pytest.raises(RuntimeStateError, match="spawned process"):
+        famepy.default_session(other)
+    with pytest.raises(RuntimeStateError, match="spawned process"):
+        famepy.version()
+    assert fake.fake.calls == []
 
 
 def test_library_is_fixed_for_the_process_once_loaded(fake, monkeypatch, tmp_path):
@@ -278,13 +355,15 @@ def test_library_is_fixed_for_the_process_once_loaded(fake, monkeypatch, tmp_pat
     monkeypatch.setenv("FAME", str(tmp_path))
     owner = famepy.initialize()
     assert owner is replaced
-    owner.finalize()
     with pytest.raises(RuntimeStateError, match="fixed"):
         famepy.default_session(path)
     with pytest.raises(RuntimeStateError, match="fixed"):
         famepy.initialize(path)
     assert famepy.initialize() is owner
     owner.finalize()
+    with pytest.raises(RuntimeStateError, match="spawned process"):
+        famepy.default_session(path)
+    assert famepy.default_session() is owner
 
 
 def test_extended_error_is_captured_at_the_failure(session, tmp_path):

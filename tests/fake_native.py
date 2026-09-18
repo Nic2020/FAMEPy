@@ -27,7 +27,7 @@ import numpy as np
 from famepy._constants import FREQUENCY_MONTHLY, FREQUENCY_UNDEFINED
 from famepy._native import RangeSpec, Sentinels, WildcardEntry
 
-HSUCC, HNOOBJ, HTRUNC, HBOPT, HFAMER = 0, 13, 18, 67, 513
+HSUCC, HFIN, HNOOBJ, HTRUNC, HBOPT, HFAMER = 0, 3, 13, 18, 67, 513
 # Synthetic statuses used only by this fake.
 S_NOT_INITIALIZED = 901
 S_ALREADY_INITIALIZED = 902
@@ -125,6 +125,7 @@ class FakeNative:
     missing_symbols: set[str] = field(default_factory=set)
     version_value: float = 11.8
     memory: dict[str, dict[str, FakeObject]] = field(default_factory=dict)
+    profile: Sentinels = SENTINELS
     # Fault switches used by the intentionally faulty backends.
     canonicalize_nan: bool = False
     discard_posts: bool = False
@@ -169,16 +170,22 @@ class FakeNative:
     # -- lifetime -------------------------------------------------------
 
     def initialize(self) -> None:
+        """One-shot: after a finalization the fake reports HFIN like the library."""
         self._enter("cfmini", needs_init=False)
         if self.init_delay:
             time.sleep(self.init_delay)
+        if self.fin_count:
+            raise FakeStatus(HFIN)
         if self.initialized:
             raise FakeStatus(S_ALREADY_INITIALIZED)
         self.initialized = True
         self.init_count += 1
 
     def finalize(self) -> None:
+        """One-shot: a second finalization reports HFIN."""
         self._enter("cfmfin", needs_init=False)
+        if self.fin_count:
+            raise FakeStatus(HFIN)
         if not self.initialized:
             raise FakeStatus(S_NOT_INITIALIZED)
         self.initialized = False
@@ -194,7 +201,7 @@ class FakeNative:
 
     def sentinels(self) -> Sentinels:
         self.calls.append("globals")
-        return SENTINELS
+        return self.profile
 
     # -- databases ------------------------------------------------------
 
@@ -288,7 +295,7 @@ class FakeNative:
             raise FakeStatus(S_EXISTS)
         if class_code not in (1, 2):
             raise FakeStatus(HBOPT)
-        nc = SENTINELS.index_nc
+        nc = self.profile.index_nc
         handle.objects[text] = FakeObject(
             class_code,
             type_code,
@@ -359,11 +366,11 @@ class FakeNative:
 
     def _filler(self, kind: str) -> Any:
         return {
-            "precision": SENTINELS.precision_na,
-            "numeric": SENTINELS.numeric_na,
-            "boolean": SENTINELS.boolean_na,
-            "date": SENTINELS.index_na,
-            "string": SENTINELS.string_na,
+            "precision": self.profile.precision_na,
+            "numeric": self.profile.numeric_na,
+            "boolean": self.profile.boolean_na,
+            "date": self.profile.index_na,
+            "string": self.profile.string_na,
         }[kind]
 
     def _get(
@@ -586,11 +593,15 @@ class FakeNative:
             }[kind]
         )
         table = {
-            "precision": (SENTINELS.precision_nc, SENTINELS.precision_na, SENTINELS.precision_nd),
-            "numeric": (SENTINELS.numeric_nc, SENTINELS.numeric_na, SENTINELS.numeric_nd),
-            "boolean": (SENTINELS.boolean_nc, SENTINELS.boolean_na, SENTINELS.boolean_nd),
-            "string": (SENTINELS.string_nc, SENTINELS.string_na, SENTINELS.string_nd),
-            "date": (SENTINELS.index_nc, SENTINELS.index_na, SENTINELS.index_nd),
+            "precision": (
+                self.profile.precision_nc,
+                self.profile.precision_na,
+                self.profile.precision_nd,
+            ),
+            "numeric": (self.profile.numeric_nc, self.profile.numeric_na, self.profile.numeric_nd),
+            "boolean": (self.profile.boolean_nc, self.profile.boolean_na, self.profile.boolean_nd),
+            "string": (self.profile.string_nc, self.profile.string_na, self.profile.string_nd),
+            "date": (self.profile.index_nc, self.profile.index_na, self.profile.index_nd),
         }[kind]
         if kind in ("precision", "numeric"):
             dtype = np.float64 if kind == "precision" else np.float32
@@ -696,4 +707,37 @@ def make_hanging_backend() -> StatusAdapter:
     """Blocks inside initialization long enough to trip a short timeout."""
     adapter = make_fake(persist=True)
     adapter.fake.init_delay = 60.0
+    return adapter
+
+
+# -- alternative sentinel profile: distinct finite (non-NaN) floating sentinels --
+
+FINITE_SENTINELS = Sentinels(
+    index_nc=SENTINELS.index_nc,
+    index_na=SENTINELS.index_na,
+    index_nd=SENTINELS.index_nd,
+    # Values chosen away from anything the tests or runner write as data.
+    precision_nc=1.125e301,
+    precision_na=2.125e301,
+    precision_nd=3.125e301,
+    numeric_nc=np.float32(1.125e37),
+    numeric_na=np.float32(2.125e37),
+    numeric_nd=np.float32(3.125e37),
+    boolean_nc=SENTINELS.boolean_nc,
+    boolean_na=SENTINELS.boolean_na,
+    boolean_nd=SENTINELS.boolean_nd,
+    string_nc=b"NC",
+    string_na=b"NA",
+    string_nd=b"ND",
+)
+
+
+def make_finite_sentinel_backend() -> StatusAdapter:
+    """Synthetic profile whose floating sentinels are distinct finite values.
+
+    Nothing here is a vendor value; it exists so that no code path may assume
+    that missing floating observations are IEEE NaNs.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.profile = FINITE_SENTINELS
     return adapter

@@ -46,7 +46,7 @@ buffer and keeps it alive for the call.
 | fame_get_booleans | same with `int *values` | owned int32 buffer | raw data |
 | fame_get_dates | same with `index *values` | owned int64 buffer | raw data |
 | fame_len_strings | `int key, const char *name, range *, int *lengths` | owned int32 buffer of range length | raw data |
-| fame_get_strings | `int key, const char *name, range *, char **values, int *lengths, int *missing(NULL)` | owned array of owned buffers sized from `fame_len_strings` plus terminators; `missing` is not used | raw data |
+| fame_get_strings | `int key, const char *name, range *, char **values, const int *inlen, int *outlen(NULL)` | owned array of owned buffers sized from `fame_len_strings` plus terminators; `inlen` carries those capacities; the optional `outlen` output lengths are not requested (NULL) | raw data |
 | fame_write_precisions | `int key, const char *name, range *, const double *values` | caller's validated float64 buffer, never converted | raw data |
 | fame_write_numerics | same with `const float *` | caller's float32 buffer | raw data |
 | fame_write_booleans | same with `const int *` | caller's int32 buffer | raw data |
@@ -85,6 +85,7 @@ the bitwise form is relied on.
 | class, type, frequency, basis, observed codes | as in `famepy._constants` | reference tables |
 
 Unknowns to record per host: the `cfmlerr` declaration, the text encoding the
-library expects for names, paths and commands, the exact meaning of the
-`missing` output array of `fame_get_strings`, and whether initialization has
-root-level dependency requirements beyond the library directory.
+library expects for names, paths and commands, and whether initialization has
+root-level dependency requirements beyond the library directory. The
+lifecycle facts to confirm per host: initialization happens once per process
+and finalization is the last native call (the package assumes both).

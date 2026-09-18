@@ -504,7 +504,7 @@ class CtypesNative:
             pointer,
             pointers,
             capacities.ctypes.data_as(ct.POINTER(ct.c_int32)),
-            None,
+            None,  # optional output lengths (outlen) are not requested
         )
         result = []
         for buffer, capacity, returned in zip(buffers, lengths, capacities, strict=True):

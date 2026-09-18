@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 """FAME CHLI bindings and TimeSeriesEconPy integration; import never loads CHLI.
 
-Runtime: ``initialize()``, ``finalize()``, ``reset()``, ``version()``.
+Runtime: ``initialize()``, ``finalize()``, ``version()`` (one-shot per process;
+``reset()`` is unsupported and raises).
 Databases: ``open_database()``, ``work_database()``, ``Database``.
 Objects: ``quick_info()``, ``list_objects()``, ``read_object()``, ``write_object()``.
 Commands: ``run_command()``. The tsecon bridge lives in ``famepy.bridge``.

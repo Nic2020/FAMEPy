@@ -21,11 +21,14 @@ from typing import Any
 from ._report import Recorder
 
 
-def _build_session(config: dict[str, Any]) -> Any:
+def _build_session(config: dict[str, Any], share: Any = None) -> Any:
+    """A new Session wrapper from the configuration; never initializes it."""
     from famepy._runtime import Session
 
     factory = config.get("backend")
     if factory:
+        if share is not None:
+            return Session(native=share._native)
         module_name, _, attribute = factory.partition(":")
         module = importlib.import_module(module_name)
         native = getattr(module, attribute)()
@@ -78,6 +81,9 @@ def main(argv: list[str] | None = None) -> int:
 
     julia = config.get("julia")
     context = Context(session, scratch, recorder, child_command, timeout, julia, config)
+    # A second wrapper over the same configuration (the same library candidate,
+    # or for injected backends the same backend instance) for rejection checks.
+    context.new_session = lambda: _build_session(config, share=session)
     exit_code = 0
     try:
         if group == "verify":
@@ -98,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         exit_code = 32
     finally:
         try:
-            if session.state in ("initialized", "broken"):
+            if session.is_initialized:
                 session.finalize()
         except Exception as error:  # noqa: BLE001
             recorder.add(_outside(error, "finalize_in_cleanup"))

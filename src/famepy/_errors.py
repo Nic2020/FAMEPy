@@ -9,6 +9,7 @@ import operator
 
 # Status codes confirmed by header inspection on both inspected installations.
 HSUCC = 0
+HFIN = 3
 HNOOBJ = 13
 HTRUNC = 18
 HBOPT = 67
@@ -17,6 +18,7 @@ HLICFL = 98
 HFAMER = 513
 
 _MESSAGES = {
+    HFIN: "CHLI was already finalized in this process; it initializes once per process.",
     HNOOBJ: "Object does not exist.",
     HTRUNC: "Data or text was truncated.",
     HBOPT: "Bad option.",
@@ -81,7 +83,7 @@ class InheritedRuntimeError(RuntimeStateError):
 
 
 class StaleHandleError(RuntimeStateError):
-    """A database handle belongs to a finalized or reset runtime."""
+    """A database handle belongs to a finalized runtime or was closed."""
 
 
 class LicensingConfigurationError(RuntimeStateError):

@@ -8,7 +8,7 @@ package does not promise rollback or mode-specific persistence semantics; the
 native validation campaign records what each mode actually does.
 
 Every operation on a handle validates the handle inside the process lock it
-holds for the native call, so a concurrent close or runtime reset cannot slip
+holds for the native call, so a concurrent close or finalization cannot slip
 between the check and the call. A failed native close keeps the handle open
 and tracked so that it can be retried or cleaned up at finalization.
 """
@@ -61,7 +61,11 @@ class Database:
 
     @property
     def is_open(self) -> bool:
-        return self._open and self._generation == self._session.generation
+        return (
+            self._open
+            and self._generation == self._session.generation
+            and not self._session.is_terminal
+        )
 
     @property
     def is_writable(self) -> bool:
@@ -78,9 +82,9 @@ class Database:
         self._open = False
 
     def _check_open(self, action: str) -> None:
-        if self._generation != self._session.generation:
+        if self._generation != self._session.generation or self._session.is_terminal:
             raise StaleHandleError(
-                f"Cannot {action}: the database handle belongs to a finalized or reset runtime."
+                f"Cannot {action}: the database handle belongs to a finalized runtime."
             )
         if not self._open:
             raise StaleHandleError(f"Cannot {action}: the database is closed.")
@@ -108,7 +112,7 @@ class Database:
         with _runtime.LOCK:
             if not self._open:
                 return
-            if self._generation != self._session.generation:
+            if self._generation != self._session.generation or self._session.is_terminal:
                 # The runtime that owned this handle is gone; nothing to close.
                 self._open = False
                 self._session._unregister(self)

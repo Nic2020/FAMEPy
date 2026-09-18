@@ -101,6 +101,7 @@ def test_loaded_explicit_owner_fork(tmp_path, monkeypatch):
     "field,value",
     [
         ("imported_from_site_packages", False),
+        ("imported_from_checkout", True),
         ("source_sha", None),
         ("wheel_name_valid", False),
         ("wheel_matches_installed", False),
@@ -110,6 +111,7 @@ def test_loaded_explicit_owner_fork(tmp_path, monkeypatch):
 def test_native_provenance_gate(tmp_path, monkeypatch, field, value):
     identity = dict(
         imported_from_site_packages=True,
+        imported_from_checkout=False,
         source_sha="a" * 40,
         wheel_name_valid=True,
         wheel_matches_installed=True,

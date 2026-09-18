@@ -81,10 +81,16 @@ Execution order and gates:
    hash and whether the wheel's shipped sources match the imported package),
    the ABI table identity, the operator's attestation, scratch reservation,
    discovery and symbol probe including the presence-only row.
-2. `lifecycle` (child): initialize, version, sentinel facts, finalize, reset.
-   Failure blocks the remaining groups.
+2. `lifecycle` (child): initialize, idempotence, version, sentinel facts,
+   refusal of `reset()`, one terminal finalize, then rejection of every
+   reinitialization route (same session, new wrapper, operations) before any
+   native call, and finally a spawned fresh-process child that initializes,
+   reads the version and finalizes on its own. Failure blocks the remaining
+   groups.
 3. `database`, `raw_matrix`, `discovery`, `commands`, `bridge`: each in its
-   own child with its own runtime and scratch subdirectory. Calendar indices
+   own child with its own one-shot runtime and scratch subdirectory; every
+   group finalizes exactly once at its end (the database group finalizes
+   while a handle is still open to prove the stale-handle contract). Calendar indices
    used by the groups come from the library's own year/period conversion.
    Persistence is verified by a further child that reopens the database
    read-only and compares class, type, frequency, range and exact value bits

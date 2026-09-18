@@ -9,7 +9,7 @@
  *   904 read-only database   905 object/database exists 906 missing database
  *   907 type mismatch        908 bad range             909 bad wildcard
  *   910 bad mode             911 name too long
- * Reference-derived statuses: 0 success, 13 no object, 18 truncated, 67 bad
+ * Reference-derived statuses: 0 success, 3 already finished, 13 no object, 18 truncated, 67 bad
  * option, 513 command error (extended text available).
  */
 #define _CRT_SECURE_NO_WARNINGS
@@ -36,6 +36,7 @@
 #define S_BAD_WILDCARD 909
 #define S_BAD_MODE 910
 #define S_NAME_TOO_LONG 911
+#define HFIN 3
 #define HNOOBJ 13
 #define HTRUNC 18
 #define HBOPT 67
@@ -196,8 +197,10 @@ static Store *find_store(const char *name) {
 
 /* ---- lifetime ---------------------------------------------------------- */
 
+/* Like the library: cfmini works once per process and cfmfin is terminal. */
 API void cfmini(int32_t *status) {
     CFM_ENTER(status);
+    if (fin_count) { *status = HFIN; return; }
     if (initialized) { *status = S_ALREADY_INITIALIZED; return; }
     initialized = 1;
     ++init_count;
@@ -206,6 +209,7 @@ API void cfmini(int32_t *status) {
 
 API void cfmfin(int32_t *status) {
     CFM_ENTER(status);
+    if (fin_count) { *status = HFIN; return; }
     if (!initialized) { *status = S_NOT_INITIALIZED; return; }
     initialized = 0;
     ++fin_count;

@@ -21,24 +21,43 @@ directories for the process lifetime; `PATH` is never modified.
 Initialization requires the `FAME` environment variable because the library
 needs it for licensing.
 
-`initialize()` returns the process default session and is idempotent. Exactly
-one session may be initialized per process. The native library is fixed for
-the process lifetime once loaded: no unload is attempted, and choosing a
-different library or root after a load raises `RuntimeStateError`; use a new
-process. Each initialization increments a generation; database handles from
-an earlier generation raise `StaleHandleError`. `finalize()` closes tracked
-databases (recording any close statuses on `last_cleanup_statuses`), then
-finalizes. Ownership is released only by a successful `cfmfin`: a failed
-finalization, including the cleanup after a failed startup, leaves the session
-`broken` and still owning the process, so no other session (and no new
-wrapper over the same library) can initialize until `finalize()` is retried
-successfully. A failed initialization before `cfmini` leaves the session
-retryable. Any use of a session after `fork`, including creating a new session
-in the child, raises `InheritedRuntimeError`.
+The runtime is one-shot per process. CHLI initializes once, and finalization
+is the last native call the process makes; a spawned process is the supported
+fresh-runtime boundary. `initialize()` returns the process default session
+and is idempotent while active. Exactly one session may initialize per
+process, and once any session has attempted `cfmini` no other session, no
+new wrapper over the same library and no other library candidate can
+initialize in that process: every such attempt raises `RuntimeStateError`
+before any native call. The native library is fixed for the process
+lifetime once loaded: no unload is attempted, and choosing a different
+library or root after a load raises `RuntimeStateError`.
+
+States are `created` -> `loaded` -> `initialized` -> `finalized`, plus two
+other terminal states: `failed` when `cfmini` failed or was interrupted (the
+package does not assume a failed native initialization can be retried), and
+`broken` when `cfmfin` failed or was interrupted. Python-level checks that run before
+`cfmini` (the licensing environment, ownership) leave the session `loaded`
+and retryable because nothing native was consumed. When setup fails after a
+successful `cfmini` (for example the sentinel globals cannot be read), one
+`cfmfin` is attempted as the terminal call, its status is recorded on
+`finalize_status` (or remains `None` if no status was returned), and the original
+setup error is what propagates; the
+session ends `finalized` or `broken`, never reusable. `cfmfin` is issued at
+most once per process: a failed finalization is not retried, and calling
+`finalize()` in any terminal or never-initialized state is a harmless
+Python-level no-op. `finalize()` closes tracked databases first (recording
+any close statuses on `last_cleanup_statuses`) and invalidates every handle;
+a handle used after finalization raises `StaleHandleError`. `generation` is 0
+before the single initialization and 1 after it.
+
+`reset()` (module-level and `Session.reset`) is not supported: it raises
+`UnsupportedOperationError` before finalizing or touching anything, whatever
+the state. Any use of a session after `fork`, including creating a new
+session in the child, raises `InheritedRuntimeError`.
 
 Every operation holds one process-wide reentrant lock for its whole duration,
-and every operation on a database handle validates the handle (open, same
-generation) inside that lock, immediately before the native call. A read
+and every operation on a database handle validates the handle (open, runtime
+still initialized) inside that lock, immediately before the native call. A read
 obtains metadata and data in one locked operation, so a concurrent close, key
 reuse or object replacement cannot slip between validation and the call. Work
 databases, ITEM options, wildcard cursors, output redirection and the extended
@@ -106,8 +125,11 @@ observations, 2**28 string bytes).
 
 `classify_by_sentinel` compares bit patterns with the globals read after
 initialization; `missing_type` asks the library per value. The campaign checks
-their agreement before the bitwise form is trusted for vendor data. Boolean
-missing codes are never coerced to True.
+their agreement before the bitwise form is trusted for vendor data. Nothing
+assumes that floating missing values are NaNs: the sentinels are whatever the
+library exports (the first campaign observed distinct non-NaN precision
+values), and the offline tests run a synthetic finite-sentinel profile as
+well as the NaN-payload profile. Boolean missing codes are never coerced to True.
 
 `write_object(..., replace=True)` deletes an existing object first, as the
 reference does; without it the library's own status for an existing name is
