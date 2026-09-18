@@ -355,16 +355,6 @@ static const char *type_label(int32_t type) {
     }
 }
 
-static const char *freq_label(int32_t freq) {
-    switch (freq) {
-    case 0: return "UNDEFINED";
-    case 129: return "MONTHLY";
-    case 162: return "QUARTERLY_DECEMBER";
-    case 232: return "CASE";
-    default: return "OTHER";
-    }
-}
-
 /* ---- databases --------------------------------------------------------- */
 
 API void cfmopwk(int32_t *status, int32_t *key) {
