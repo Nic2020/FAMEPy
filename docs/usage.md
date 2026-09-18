@@ -10,9 +10,9 @@ commands must be ASCII `str` values or NUL-free `bytes` in this release.
 ```python
 import famepy
 
-session = famepy.initialize()      # one initialized owner per process
-print(famepy.version())            # library version as a float
-famepy.reset()                     # finalize and initialize again; handles become stale
+session = famepy.initialize()  # one initialized owner per process
+print(famepy.version())  # library version as a float
+famepy.reset()  # finalize and initialize again; handles become stale
 famepy.finalize()
 ```
 
@@ -25,15 +25,15 @@ library is fixed for the process once loaded.
 ## Databases
 
 ```python
-with famepy.open_database("synthetic.db", "create") as db:   # read-only is the default mode
+with famepy.open_database("synthetic.db", "create") as db:  # read-only is the default mode
     famepy.write_object(db, "x", famepy.scalar("precision", 1.5))
-    db.post()                                                   # closing never posts
+    db.post()  # closing never posts
 
 with famepy.open_database("synthetic.db") as db:
     info = famepy.quick_info(db, "x")
     print(info.kind, info.frequency_label, famepy.read_object(db, "x").value)
 
-work = famepy.work_database()      # the process work database, opened once
+work = famepy.work_database()  # the process work database, opened once
 ```
 
 Modes: integers 1-7, names (`readonly`, `create`, `overwrite`, `update`,
@@ -50,7 +50,7 @@ values = np.array([1.0, 2.0, np.nan])
 raw = famepy.series("precision", "monthly", first_index, values)
 famepy.write_object(db, "s", raw, replace=True)
 
-back = famepy.read_object(db, "s")               # RawSeries with an owning float64 array
+back = famepy.read_object(db, "s")  # RawSeries with an owning float64 array
 codes = famepy.classify_by_sentinel(back.values, "precision", db.session.sentinels)
 part = famepy.read_object(db, "s", first_index=first_index + 1, last_index=first_index + 2)
 ```
@@ -69,7 +69,7 @@ first; that deletion is not undone if the following native write fails.
 
 ```python
 infos = famepy.list_objects(db, "sales?", classes="series", frequencies="monthly")
-output = famepy.run_command("display 2+2")                 # bytes of captured output
+output = famepy.run_command("display 2+2")  # bytes of captured output
 famepy.run_command("input setup", base_dir=".", quiet=True)  # recursive INPUT expansion
 ```
 
@@ -88,9 +88,9 @@ from tsecon import TSeries, mm
 from famepy import bridge
 
 ts = TSeries(mm(2020, 1), [1.0, float("nan"), 3.0])
-bridge.write_tseries("synthetic.db", "ts", ts, mode="update")   # posts and closes
-back = bridge.read_tseries("synthetic.db", "ts")                 # NaN for NC/NA/ND
-strict = bridge.read_tseries(db, "ts", missing="strict")         # raises on missing
+bridge.write_tseries("synthetic.db", "ts", ts, mode="update")  # posts and closes
+back = bridge.read_tseries("synthetic.db", "ts")  # NaN for NC/NA/ND
+strict = bridge.read_tseries(db, "ts", missing="strict")  # raises on missing
 ```
 
 See [contracts](contracts.md) for the missing and empty-series conventions.

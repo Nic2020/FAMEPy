@@ -7,14 +7,18 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 import famepy
 from famepy import _probe, _runtime, diagnostics, validation
 
 
-def _install(tmp_path):
+def _install(tmp_path, system=None):
     root = tmp_path / "installation"
-    (root / "64").mkdir(parents=True)
-    library = root / "64" / "chli.dll"
+    system = sys.platform if system is None else system
+    relative = "64/chli.dll" if system == "win32" else "hli/64/libchli.so"
+    library = root / relative
+    library.parent.mkdir(parents=True)
     library.touch()
     return root, library
 
@@ -29,8 +33,10 @@ def _symbols():
     )
 
 
-def test_diagnose_forwards_the_trusted_root_to_the_probe(tmp_path, monkeypatch):
-    root, library = _install(tmp_path)
+@pytest.mark.parametrize("system", ["win32", "linux"])
+def test_diagnose_forwards_the_trusted_root_to_the_probe(tmp_path, monkeypatch, system):
+    root, library = _install(tmp_path, system)
+    monkeypatch.setattr(diagnostics.sys, "platform", system)
     requests = []
 
     def fake_run(command, **kwargs):

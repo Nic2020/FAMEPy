@@ -15,4 +15,4 @@ repos:
         name: ruff format
         entry: python -m ruff format --check
         language: system
-        types: [python]
+        types_or: [python, markdown]
