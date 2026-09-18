@@ -120,7 +120,8 @@ def test_lifetime_counters_and_fault_injection(native, library):
 
 def test_globals_are_read_with_declared_types(session):
     sentinels = session.sentinels
-    assert sentinels.string_nc == b"NC" and sentinels.string_nd == b"ND"
+    assert sentinels.string_nc == b"\xfe\x01" and sentinels.string_nd == b"\xfe\x03"
+    assert not sentinels.string_nc.isascii()
     assert sentinels.index_nc != sentinels.index_na != sentinels.index_nd
     assert np.isnan(sentinels.precision_nc) and np.isnan(sentinels.numeric_na)
     assert np.array(sentinels.precision_nc).view(np.uint64) != np.array(
@@ -161,7 +162,7 @@ def test_every_kind_round_trips_through_the_shim(db, session):
     numeric = np.array([2.0, sentinels.numeric_nc], dtype=np.float32)
     boolean = np.array([1, 0, sentinels.boolean_nd], dtype=np.int32)
     dates = np.array([24240, sentinels.index_na], dtype=np.int64)
-    strings = [b"alpha", b"", b"NC"]
+    strings = [b"alpha", b"", session.sentinels.string_nc]
     famepy.write_object(db, "p", famepy.series("precision", "monthly", 10, precision))
     famepy.write_object(db, "n", famepy.series("numeric", "monthly", 10, numeric))
     famepy.write_object(db, "b", famepy.series("boolean", "monthly", 10, boolean))
@@ -191,7 +192,8 @@ def test_every_kind_round_trips_through_the_shim(db, session):
         assert famepy.read_object(reopened, "d").values.tolist() == dates.tolist()
         assert famepy.missing_type(reopened, "date", int(dates[1])) == 2
         assert famepy.read_object(reopened, "s").values == strings
-        assert famepy.missing_type(reopened, "string", b"NC") == 1
+        assert famepy.missing_type(reopened, "string", session.sentinels.string_nc) == 1
+        assert famepy.missing_type(reopened, "string", b"NC") == 0
         assert famepy.read_object(reopened, "nl").value == b"{A,B}"
         assert famepy.read_object(reopened, "ss").value == b"hello world"
         assert famepy.read_object(reopened, "ds") == famepy.RawScalar("date", 5, 129)

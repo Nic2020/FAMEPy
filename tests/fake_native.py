@@ -1,12 +1,22 @@
 # SPDX-License-Identifier: MIT
 """In-memory NativeInterface emulation for tests. Not FAME behavior evidence.
 
-The fake models the contracts FAMEPy relies on: one initialization at a time,
-handles keyed by integers, unposted writes discarded on close, uppercase
-object names, wildcard cursors, process-global ITEM options and output
-redirection. Databases persist as pickles at their path so that separate
-processes can verify posted data. Synthetic status codes are documented below.
-Float32 values are stored as ``numpy.float32`` so that bit patterns survive.
+The fake models the contracts FAMEPy relies on: one initialization per
+process, handles keyed by integers, unposted writes discarded on close,
+uppercase object names, wildcard cursors, process-global ITEM options and
+output redirection. Databases persist as pickles at their path so that
+separate processes can verify posted data. Synthetic status codes are
+documented below. Float32 values are stored as ``numpy.float32`` so that
+bit patterns survive.
+
+Behaviors observed on both protected hosts and modeled here on purpose:
+string missing sentinels are two bytes that are not ASCII text; the
+``ITEM FREQUENCY <name>`` selection is accepted but has no effect on the
+wildcard (class, type and alias selections do); a command displayed while
+no redirection is active goes to the C-level standard output of the
+process. Endpoint behavior of missing observations and the prerequisites
+of the write/direct-write modes are not established, so the fake stores
+exactly what is written and accepts those modes on an existing database.
 
 Intentionally faulty variants (``make_*_backend``) exist so that the
 validation runner can be shown to report FAIL/BLOCKED for each defect.
@@ -15,6 +25,7 @@ validation runner can be shown to report FAIL/BLOCKED for each defect.
 from __future__ import annotations
 
 import copy
+import os
 import pickle
 import re
 import time
@@ -40,6 +51,8 @@ S_RANGE = 908
 S_BAD_WILDCARD = 909
 S_BAD_MODE = 910
 S_NAME_TOO_LONG = 911
+S_REFUSED_OBJECT = 912  # a synthetic per-object creation refusal (self-test only)
+S_CLASSIFIER = 913  # a synthetic classifier failure (self-test only)
 
 PRIVATE_MARKER = "SYNTHETIC_PRIVATE_PATH_TOKEN"
 
@@ -65,9 +78,11 @@ SENTINELS = Sentinels(
     boolean_nc=-2147483647,
     boolean_na=-2147483646,
     boolean_nd=-2147483645,
-    string_nc=b"NC",
-    string_na=b"NA",
-    string_nd=b"ND",
+    # Two bytes each, not ASCII text: the library's string sentinels are not
+    # decodable text either (both hosts). Synthetic values, not vendor ones.
+    string_nc=b"\xfe\x01",
+    string_na=b"\xfe\x02",
+    string_nd=b"\xfe\x03",
 )
 
 _TYPE_OF_KIND = {5: "precision", 1: "numeric", 3: "boolean", 4: "string", 2: "namelist"}
@@ -131,6 +146,16 @@ class FakeNative:
     discard_posts: bool = False
     leak_marker: bool = False
     init_delay: float = 0.0
+    stream_noise: bool = False
+    refuse_redirect: int | None = None
+    refuse_restore: int | None = None
+    refuse_modes: dict[int, int] = field(default_factory=dict)
+    refuse_objects: dict[str, int] = field(default_factory=dict)
+    trim_nd: bool = False
+    drop_neighbour: bool = False
+    corrupt_reads: dict[str, Any] = field(default_factory=dict)
+    shift_ranges: dict[str, int] = field(default_factory=dict)
+    fail_after: dict[str, list[int]] = field(default_factory=dict)
 
     # -- helpers -------------------------------------------------------
 
@@ -139,6 +164,13 @@ class FakeNative:
         status = self.fail_next.pop(name, None)
         if status is not None:
             raise FakeStatus(status)
+        countdown = self.fail_after.get(name)
+        if countdown is not None:
+            # [remaining successful calls, status]: fails once the count is spent.
+            if countdown[0] == 0:
+                del self.fail_after[name]
+                raise FakeStatus(countdown[1])
+            countdown[0] -= 1
         if needs_init and not self.initialized:
             raise FakeStatus(S_NOT_INITIALIZED)
 
@@ -174,6 +206,13 @@ class FakeNative:
         self._enter("cfmini", needs_init=False)
         if self.init_delay:
             time.sleep(self.init_delay)
+        if self.stream_noise:
+            # C-level writes that bypass sys.stdout/sys.stderr, as a native
+            # library would produce; they must never reach a parent's report.
+            _write_descriptor(1, b'{"group": "forged", "cases": []}\n' + b"noise " * 8)
+            _write_descriptor(2, b"native diagnostic text\n")
+        if self.leak_marker:
+            _write_descriptor(1, PRIVATE_MARKER.encode() + b"\n")
         if self.fin_count:
             raise FakeStatus(HFIN)
         if self.initialized:
@@ -219,6 +258,8 @@ class FakeNative:
         self._enter("cfmopdb")
         if not 1 <= mode <= 7:
             raise FakeStatus(S_BAD_MODE)
+        if mode in self.refuse_modes:
+            raise FakeStatus(self.refuse_modes[mode])
         text = name.decode("ascii")
         if self.persist:
             path = self._store_path(name)
@@ -274,7 +315,8 @@ class FakeNative:
         if self.leak_marker and name.upper() == b"OTHER":
             raise OSError(13, PRIVATE_MARKER, PRIVATE_MARKER + ".db")
         obj = self._object(key, name)
-        return obj.class_code, obj.type_code, obj.frequency, obj.first, obj.last
+        shift = self.shift_ranges.get(name.decode("ascii").upper(), 0)
+        return obj.class_code, obj.type_code, obj.frequency, obj.first + shift, obj.last + shift
 
     def new_object(
         self,
@@ -293,6 +335,8 @@ class FakeNative:
             raise FakeStatus(S_NAME_TOO_LONG)
         if text in handle.objects:
             raise FakeStatus(S_EXISTS)
+        if text in self.refuse_objects:
+            raise FakeStatus(self.refuse_objects[text])
         if class_code not in (1, 2):
             raise FakeStatus(HBOPT)
         nc = self.profile.index_nc
@@ -331,6 +375,13 @@ class FakeNative:
             return [obj.values[0]]
         if obj.class_code != 1 or range_.frequency != obj.frequency:
             raise FakeStatus(S_RANGE)
+        corrupted = self.corrupt_reads.get(name.decode("ascii").upper())
+        if corrupted is not None:
+            # A defective backend for the self-test: returns invented values.
+            return list(corrupted)[:count]
+        shift = self.shift_ranges.get(name.decode("ascii").upper(), 0)
+        if shift:
+            return list(obj.values[:count])
         if range_.first < obj.first or range_.last > obj.last:
             raise FakeStatus(S_RANGE)
         offset = range_.first - obj.first
@@ -351,6 +402,13 @@ class FakeNative:
             return
         if obj.class_code != 1 or range_.frequency != obj.frequency:
             raise FakeStatus(S_RANGE)
+        if self.trim_nd:
+            # Alternative endpoint rule for the runner self-test only: leading
+            # and trailing ND observations are not stored. Not vendor evidence.
+            values, first = self._trimmed(kind, list(values), range_.first)
+            if not values:
+                return
+            range_ = RangeSpec(range_.frequency, first, first + len(values) - 1)
         if obj.values is None:
             obj.values = list(values)
             obj.first, obj.last = range_.first, range_.last
@@ -363,6 +421,21 @@ class FakeNative:
         merged[obj.first - new_first : obj.first - new_first + len(obj.values)] = obj.values
         merged[range_.first - new_first : range_.first - new_first + len(values)] = values
         obj.values, obj.first, obj.last = merged, new_first, new_last
+
+    def _trimmed(self, kind: str, values: list[Any], first: int) -> tuple[list[Any], int]:
+        def is_nd(value: Any) -> bool:
+            return self.missing_type(kind, value) == 3
+
+        trailing = 0
+        while values and is_nd(values[-1]):
+            values.pop()
+            trailing += 1
+        if self.drop_neighbour and trailing and values:
+            values.pop()  # a defective rule: the normal neighbour is lost too
+        while values and is_nd(values[0]):
+            values.pop(0)
+            first += 1
+        return values, first
 
     def _filler(self, kind: str) -> Any:
         return {
@@ -478,7 +551,7 @@ class FakeNative:
         self.options[name] = value
 
     def _filter(self, obj: FakeObject) -> bool:
-        from famepy._constants import ObjectClass, ObjectType, frequency_name
+        from famepy._constants import ObjectClass, ObjectType
 
         def allowed(option: bytes, label: bytes) -> bool:
             if self.options.get(b"ITEM " + option, b"ON") == b"ON":
@@ -487,12 +560,9 @@ class FakeNative:
 
         class_label = ObjectClass(obj.class_code).name.encode()
         type_label = b"DATE" if obj.type_code >= 8 else ObjectType(obj.type_code).name.encode()
-        frequency_label = frequency_name(obj.frequency).upper().encode()
-        return (
-            allowed(b"CLASS", class_label)
-            and allowed(b"TYPE", type_label)
-            and allowed(b"FREQUENCY", frequency_label)
-        )
+        # ITEM FREQUENCY selections are accepted but not applied (observed on
+        # both hosts); the package filters by metadata instead.
+        return allowed(b"CLASS", class_label) and allowed(b"TYPE", type_label)
 
     def init_wildcard(self, key: int, pattern: bytes) -> int:
         self._enter("fame_init_wildcard")
@@ -553,10 +623,20 @@ class FakeNative:
         self.commands.append(command)
         lowered = command.strip().lower()
         if lowered.startswith(b'output file("') and lowered.endswith(b'!")'):
+            if self.refuse_redirect is not None:
+                # A refused redirection leaves the terminal active, and the
+                # library's own diagnostic goes to the C-level stdout.
+                _write_descriptor(1, b"synthetic redirection diagnostic text 4\n")
+                return self.refuse_redirect
             self.output_path = Path(command.strip()[13:-3].decode("ascii"))
+            # The library creates the file itself; the package never pre-creates it.
+            with open(self.output_path, "ab"):
+                pass
             return HSUCC
         if lowered == b"output terminal":
             self.output_path = None
+            if self.refuse_restore is not None:
+                return self.refuse_restore
             return HSUCC
         if lowered.startswith(b"fail"):
             self.error_text = b"synthetic failure for " + lowered
@@ -579,6 +659,9 @@ class FakeNative:
         if self.output_path is not None:
             with open(self.output_path, "ab") as stream:
                 stream.write(text)
+        else:
+            # "Terminal" output is the C-level standard output of the process.
+            _write_descriptor(1, text)
 
     # -- classification and calendar -----------------------------------
 
@@ -632,6 +715,13 @@ class FakeNative:
         if frequency == FREQUENCY_UNDEFINED:
             raise FakeStatus(HBOPT)
         return year * 1000 + period
+
+
+def _write_descriptor(descriptor: int, data: bytes) -> None:
+    try:
+        os.write(descriptor, data)
+    except OSError:
+        pass
 
 
 class StatusAdapter:
@@ -710,6 +800,113 @@ def make_hanging_backend() -> StatusAdapter:
     return adapter
 
 
+def make_noisy_backend() -> StatusAdapter:
+    """Writes forged JSON and diagnostics to the C-level streams.
+
+    A correct runner ignores the streams entirely, so the campaign must still
+    PASS and only the size of the stray output may appear in the report.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.stream_noise = True
+    return adapter
+
+
+def make_redirect_refusing_backend() -> StatusAdapter:
+    """Every output redirection fails with the command-error status.
+
+    Reproduces the shape of the first commands campaign: each command fails
+    at the redirect stage, terminal output goes to the C-level stdout, and
+    the report must name the stage and still be well formed.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.refuse_redirect = HFAMER
+    return adapter
+
+
+def make_restore_failing_backend() -> StatusAdapter:
+    """The ``output terminal`` restoration fails after every payload."""
+    adapter = make_fake(persist=True)
+    adapter.fake.refuse_restore = 44
+    return adapter
+
+
+def make_partial_write_backend() -> StatusAdapter:
+    """One object of the raw matrix cannot be created (synthetic status).
+
+    The group must FAIL, every other object must still be written, read and
+    verified across processes, the cases that depend on the missing object
+    must be reported as blocked, and replacement/deletion (which use their
+    own fixtures) must pass.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.refuse_objects = {"S_MISSING_SERIES": S_REFUSED_OBJECT}
+    return adapter
+
+
+def make_nd_trimming_backend() -> StatusAdapter:
+    """Stores no leading or trailing ND observation (an alternative endpoint rule).
+
+    The runner records endpoint behavior as observations, so the campaign must
+    PASS under this rule as well as under exact storage; only the recorded
+    ranges and codes differ. Interior missing values are unaffected.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.trim_nd = True
+    return adapter
+
+
+def make_value_dropping_backend() -> StatusAdapter:
+    """Trims trailing ND and also loses the normal value before it.
+
+    The endpoint interior assertion must catch this; observations alone
+    would not.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.trim_nd = True
+    adapter.fake.drop_neighbour = True
+    return adapter
+
+
+def make_endpoint_corrupting_backend() -> StatusAdapter:
+    """Endpoint fixtures read back corrupted while their neighbours survive.
+
+    One trailing-ND series returns an invented ordinary value in place of
+    the ND, one all-ND series returns a changed missing code, and one
+    leading-NC series reports a shifted range. The retained-value
+    assertions must fail every one of them.
+    """
+    adapter = make_fake(persist=True)
+    fake = adapter.fake
+    fake.corrupt_reads = {
+        "P_TRAILING_ND": [1.0, 99.0],
+        "N_ALL_ND": [fake.profile.numeric_na, fake.profile.numeric_nd],
+    }
+    fake.shift_ranges = {"D_LEADING_NC": 1}
+    return adapter
+
+
+def make_classifier_failing_backend() -> StatusAdapter:
+    """The numeric classifier fails partway through one object's verification.
+
+    Only that object may fail; every object verified after it must still be
+    checked.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.fail_after = {"cfmisnm": [2, S_CLASSIFIER]}
+    return adapter
+
+
+def make_mode_refusing_backend() -> StatusAdapter:
+    """Write and direct-write opens return status 5, as both hosts did.
+
+    The database group must FAIL (not downgrade or relabel) until the mode
+    prerequisites are established.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.refuse_modes = {6: 5, 7: 5}
+    return adapter
+
+
 # -- alternative sentinel profile: distinct finite (non-NaN) floating sentinels --
 
 FINITE_SENTINELS = Sentinels(
@@ -726,9 +923,11 @@ FINITE_SENTINELS = Sentinels(
     boolean_nc=SENTINELS.boolean_nc,
     boolean_na=SENTINELS.boolean_na,
     boolean_nd=SENTINELS.boolean_nd,
-    string_nc=b"NC",
-    string_na=b"NA",
-    string_nd=b"ND",
+    # A different non-ASCII shape (leading byte 0x80, one byte) so that the
+    # two profiles disagree on string sentinels as well.
+    string_nc=b"\x80C",
+    string_na=b"\x80A",
+    string_nd=b"\x80D",
 )
 
 

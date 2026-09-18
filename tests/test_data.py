@@ -49,7 +49,7 @@ def test_numeric_boolean_date_string_series(db):
     write_object(db, "bo", series("boolean", MONTHLY, FIRST, boolean))
     dates = np.array([FIRST + 5, SENTINELS.index_nd], dtype=np.int64)
     write_object(db, "da", series("date", MONTHLY, FIRST, dates, date_frequency="monthly"))
-    strings = [b"alpha", b"", b"NC"]
+    strings = [b"alpha", b"", SENTINELS.string_nc]
     write_object(db, "st", series("string", "case", 1, strings))
 
     got = read_object(db, "nu")
@@ -220,7 +220,7 @@ def test_sentinel_substitution_helpers(db):
     sentinels = db.session.sentinels
     assert sentinel_value("boolean", 1, sentinels) == sentinels.boolean_nc
     assert sentinel_value("date", 2, sentinels) == sentinels.index_na
-    assert sentinel_value("string", 3, sentinels) == b"ND"
+    assert sentinel_value("string", 3, sentinels) == sentinels.string_nd != b"ND"
     with pytest.raises(ValueError):
         sentinel_value("precision", 0, sentinels)
 

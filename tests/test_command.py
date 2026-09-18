@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 import ctypes as ct
 import io
-import os
+from pathlib import Path
 
 import pytest
 
@@ -36,10 +36,72 @@ def test_failure_restores_output_and_keeps_partial_output_off_message(session, t
 
 
 def test_redirect_failure(session, tmp_path):
-    session._native.fake.fail_next["cfmfame"] = 67
+    fake = session._native.fake
+    fake.fail_next["cfmfame"] = 67
     with pytest.raises(CommandError) as error:
         run_command("disp 1", session=session, temp_dir=tmp_path)
     assert error.value.status == 67 and error.value.output is None
+    assert error.value.stage == "redirect" and error.value.restore_status is None
+    assert "(redirect)" in str(error.value)
+    # The payload is never issued after a failed redirection.
+    assert fake.commands == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_stages_and_original_error_preservation(session, tmp_path):
+    fake = session._native.fake
+    fake.refuse_redirect = 513
+    with pytest.raises(CommandError) as error:
+        run_command("disp 1", session=session, temp_dir=tmp_path)
+    assert error.value.stage == "redirect" and error.value.status == 513
+    assert fake.commands == [fake.commands[0]] and fake.commands[0].startswith(b"output file(")
+    fake.refuse_redirect = None
+    # Payload failure keeps the payload status even when the restoration fails too.
+    fake.refuse_restore = 44
+    with pytest.raises(CommandError) as error:
+        run_command("fail 513", session=session, temp_dir=tmp_path)
+    assert error.value.stage == "command" and error.value.status == 513
+    assert error.value.restore_status == 44
+    assert error.value.output == b"partial output before failure\n"
+    with pytest.raises(CommandError) as error:
+        run_command("disp 1", session=session, temp_dir=tmp_path)
+    assert error.value.stage == "restore" and error.value.status == 44
+    assert error.value.output == b"echo: disp 1\n"
+    assert fake.commands[-1] == b"output terminal"
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(ValueError):
+        CommandError(1, stage="elsewhere")
+
+
+def test_output_file_is_created_by_the_library_not_the_package(session, tmp_path, monkeypatch):
+    """The redirection names a fresh file inside a private directory."""
+    fake = session._native.fake
+    seen = {}
+    original = fake.execute
+
+    def execute(command):
+        if command.startswith(b'output file("'):
+            path = Path(command[13:-3].decode("ascii"))
+            seen["existed_before"] = path.exists()
+            seen["parent_private"] = path.parent.parent == tmp_path
+        return original(command)
+
+    monkeypatch.setattr(fake, "execute", execute)
+    assert run_command("disp 1", session=session, temp_dir=tmp_path) == b"echo: disp 1\n"
+    assert seen == {"existed_before": False, "parent_private": True}
+    assert list(tmp_path.iterdir()) == []
+    # A library that never created the file yields empty output, not an error.
+    monkeypatch.setattr(fake, "_emit", lambda text: None)
+    fake.refuse_redirect = None
+    original_execute = original
+
+    def no_file(command):
+        if command.startswith(b'output file("'):
+            return 0
+        return original_execute(command)
+
+    monkeypatch.setattr(fake, "execute", no_file)
+    assert run_command("disp 1", session=session, temp_dir=tmp_path) == b""
     assert list(tmp_path.iterdir()) == []
 
 
@@ -126,23 +188,12 @@ def test_run_command_expands_relative_to_base_dir(session, tmp_path):
 def test_temp_paths_are_validated_before_redirection(session, tmp_path, monkeypatch):
     import famepy._command as module
 
-    created = tmp_path / "created.out"
-    created.touch()
-    monkeypatch.setattr(
-        module.tempfile,
-        "mkstemp",
-        lambda **k: (os.open(created, os.O_RDONLY), str(tmp_path / 'q"uote.out')),
-    )
-    with pytest.raises(famepy.TextEncodingError):
-        run_command("disp 1", session=session, temp_dir=tmp_path)
-    assert session._native.fake.commands == []
-    monkeypatch.setattr(
-        module.tempfile,
-        "mkstemp",
-        lambda **k: (os.open(created, os.O_RDONLY), str(tmp_path / "café.out")),
-    )
-    with pytest.raises(famepy.TextEncodingError):
-        run_command("disp 1", session=session, temp_dir=tmp_path)
+    for name in ('q"uote', "café"):
+        directory = tmp_path / name  # not created: such names are refused before any use
+        monkeypatch.setattr(module.tempfile, "mkdtemp", lambda d=directory, **k: str(d))
+        with pytest.raises(famepy.TextEncodingError):
+            run_command("disp 1", session=session, temp_dir=tmp_path)
+        assert session._native.fake.commands == []
 
 
 def test_consecutive_input_statements_are_all_expanded(tmp_path):

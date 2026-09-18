@@ -84,11 +84,23 @@ No vendor encoding has been established. The native layer exchanges bytes.
 `str` input must be ASCII and is rejected otherwise; `bytes` pass through
 without NUL bytes. Returned names are bytes with an ASCII `name_text` view
 that raises on non-ASCII content. This is an initial validation boundary.
+String *values* are bytes end to end: the library's string missing sentinels
+are not ASCII text (two bytes each on both inspected installations), so
+nothing decodes a string value as text, and the validation runner exports
+string evidence only for values it constructed itself (as printable ASCII
+or bounded hex); bytes that differ from a fixture are reported by length.
 
 ## Databases
 
 `open_database(name, mode="readonly")` accepts the seven modes as integers,
-names or `AccessMode` members. Closing never posts; `post()` is explicit.
+names or `AccessMode` members. The package does not establish which modes an
+installation accepts for a given database: the first campaigns opened
+read-only, update, shared, create and overwrite successfully and received a
+status for `write` and `direct_write` on an existing local database, so those
+two are passed through unchanged and their prerequisites are recorded by the
+campaign rather than assumed. Closing never posts (the package issues no post
+on close; what the library does with unposted updates on close is recorded
+by the campaign as an observation); `post()` is explicit.
 Closing twice is a no-op. If the native close fails, the handle stays open and
 tracked: the status propagates, `close()` can be retried, and `finalize()`
 still attempts the close and records its status. Bridge functions that
@@ -102,7 +114,15 @@ string.
 ## Values
 
 `RawScalar` and `RawSeries` preserve native type, frequency, range and the
-NC/NA/ND encodings. Series values are exact-dtype one-dimensional arrays
+NC/NA/ND encodings *inside* a series. What the library persists for missing
+observations at the start or end of a written range, or for a range made
+only of ND, is not established: the first campaigns observed numeric,
+Boolean and date series that ended in ND reading back one observation
+shorter, while a precision series with a normal value after ND kept its
+range. The package adds no padding and trims nothing; a read returns the
+range the library reports, and the campaign records endpoint outcomes as
+observations while asserting that normal values keep their positions.
+Series values are exact-dtype one-dimensional arrays
 (float64, float32, int32, int64) or lists of bytes; a zero-length series is
 truly empty (NC endpoints). Scalar reads return exact-width NumPy scalars
 (`numpy.float32` for numeric objects, `numpy.float64`, `numpy.int32`,
@@ -140,7 +160,15 @@ raised. The default `observed` attribute is `summed` for floating data and
 
 `list_objects` sets the ITEM options it needs inside its locked operation and
 then *normalizes* the four options it uses (`ITEM CLASS`, `ITEM TYPE`,
-`ITEM FREQUENCY`, `ITEM ALIAS`) to ON. It does not restore a prior state:
+`ITEM FREQUENCY`, `ITEM ALIAS`) to ON. The `frequencies` filter accepts exact
+frequency names or codes from the frequency table (a family word such as
+`quarterly` is refused with `ValueError`) and is enforced on the metadata of
+the listed objects: an object is returned only when its frequency code is one
+of those requested, so scalars (undefined frequency) appear only when
+`undefined` is requested. The native `ITEM FREQUENCY <name>` selection is
+still issued and any option error surfaces, but the first campaigns observed
+no effect from it on either host, so the result never depends on it. It does
+not restore a prior state:
 there is no declared call to read the options back, so a selection made by an
 earlier command is not preserved across a listing. Commands that depend on
 those options must set them again afterwards. Cleanup frees the cursor and
@@ -169,9 +197,14 @@ empty series from a one-observation missing series; it is opt-in for that reason
 
 `run_command` redirects output to a temporary file with a literal
 `output file("...!")`, executes, restores `output terminal` and removes the
-file, whether or not the command fails. `CommandError` carries the status and
-any partial output on its `output` attribute, never in its message, plus the
-opt-in `extended_text` captured before the restoration. INPUT statements are
+file, whether or not the command fails. The file name is fresh inside a
+private directory created for the call and the file itself is created by
+the library, never pre-created by the package. `CommandError` carries the
+status, the failing `stage` (`redirect`, `command` or `restore`) and any
+partial output on its `output` attribute, never in its message, plus the
+opt-in `extended_text` captured before the restoration. When the payload
+fails and the restoration fails too, the payload error propagates and the
+restoration status is kept on `restore_status`. INPUT statements are
 expanded before execution: a statement starts at the beginning of the text or
 after a `;` or newline and ends before the next one, so consecutive INPUT
 statements are all expanded; literal `FILE("name")` and bare names, `.inp`

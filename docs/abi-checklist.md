@@ -86,6 +86,13 @@ the bitwise form is relied on.
 
 Unknowns to record per host: the `cfmlerr` declaration, the text encoding the
 library expects for names, paths and commands, and whether initialization has
-root-level dependency requirements beyond the library directory. The
-lifecycle facts to confirm per host: initialization happens once per process
-and finalization is the last native call (the package assumes both).
+root-level dependency requirements beyond the library directory. Both hosts
+confirmed that initialization happens once per process and that
+finalization is the last native call. Open behavioral questions the
+campaign records rather than assumes: the meaning of the status returned by
+`cfmopdb` for the `write` and `direct_write` modes and their prerequisites;
+the rule for missing observations at the ends of a written range (leading
+or trailing ND, NC, NA and all-ND ranges) per value type; the accepted
+spelling and effect of the `ITEM FREQUENCY` selection on `fame_init_wildcard`;
+and the `cfmfame` output redirection syntax and behavior when the named
+file does not exist.

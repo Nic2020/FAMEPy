@@ -177,7 +177,7 @@ def test_nested_group_timeout(tmp_path):
 
 def test_signed_minimum_in_report():
     case = {"id": "date", "status": "pass", "actual": -(2**63)}
-    assert validation._sanitize_case(case) == case
+    assert validation.sanitize_case(case) == case
 
 
 def test_cursor_cleanup_error(db):

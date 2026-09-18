@@ -2,8 +2,13 @@
 """Child entry point: run one validation group in an isolated process.
 
 Configuration arrives as JSON on stdin (library path, trusted root, backend
-factory, scratch directory, Julia settings). The result is one JSON document
-on stdout with sanitized cases only; the parent validates every field again.
+factory, scratch directory, Julia settings, result path, log path, token).
+The result is one JSON document written to the result path with sanitized
+cases only; the parent validates every field again. The child's stdout and
+stderr descriptors are redirected to the log path before anything native
+runs, so text the library prints never mixes with the result. Without a
+result path (a worker run by hand) the document is printed instead.
+
 Exit codes: 0 completed (cases may still fail), 30 configuration invalid, 31
 backend construction failed, 32 group raised outside the recorder, 33
 manifest invalid.
@@ -18,6 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ._process import redirect_streams, write_result
 from ._report import Recorder
 
 
@@ -39,6 +45,11 @@ def _build_session(config: dict[str, Any], share: Any = None) -> Any:
     return Session(candidate)
 
 
+def _deliver(config: dict[str, Any], payload: dict[str, Any]) -> None:
+    if not write_result(config, payload):
+        print(json.dumps(payload, sort_keys=True))
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     try:
@@ -50,7 +61,8 @@ def main(argv: list[str] | None = None) -> int:
         timeout = float(config.get("timeout", 120.0))
         if not scratch.is_dir():
             raise ValueError
-    except (ValueError, KeyError, IndexError, TypeError):
+        redirect_streams(config)
+    except (ValueError, KeyError, IndexError, TypeError, OSError):
         return 30
     try:
         from ._probe_dialogs import suppress_error_dialogs
@@ -62,16 +74,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         session = _build_session(config)
     except Exception as error:  # noqa: BLE001
-        print(
-            json.dumps(
-                {
-                    "group": group,
-                    "setup_error": type(error).__name__,
-                    "status_code": getattr(error, "status", None),
-                    "errno": getattr(error, "errno", None),
-                    "winerror": getattr(error, "winerror", None),
-                }
-            )
+        _deliver(
+            config,
+            {
+                "group": group,
+                "setup_error": type(error).__name__,
+                "status_code": getattr(error, "status", None),
+                "errno": getattr(error, "errno", None),
+                "winerror": getattr(error, "winerror", None),
+            },
         )
         return 31
     from ._groups import GROUP_FUNCTIONS, Context, run_verify
@@ -114,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         "counts": recorder.counts(),
         "pid": os.getpid(),
     }
-    print(json.dumps(payload, sort_keys=True))
+    _deliver(config, payload)
     return exit_code
 
 

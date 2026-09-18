@@ -6,7 +6,9 @@
 The reference notes that the command interface does not process INPUT and
 limits a command to 2**20 bytes, so INPUT lines are replaced by file contents
 before execution. Output is redirected to a temporary file for the duration of
-one locked operation and always restored, even on failure.
+one locked operation and always restored, even on failure. The temporary
+file is a fresh name inside a private directory created for the call; the
+package never pre-creates the file, so the library opens it itself.
 """
 
 from __future__ import annotations
@@ -142,12 +144,30 @@ def _expand(
 
 
 def _quote_path(path: Path) -> bytes:
-    text = str(path)
+    text = os.fspath(path)
     if not text.isascii():
         raise TextEncodingError("The temporary output directory must have an ASCII path.")
     if '"' in text:
         raise TextEncodingError("The temporary output directory cannot contain quotes.")
     return text.encode("ascii")
+
+
+def _captured_output(path: Path) -> bytes:
+    """The redirected output; a file the library never created reads as empty."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return b""
+
+
+def _remove_quietly(path: Path) -> None:
+    try:
+        if path.is_dir():
+            path.rmdir()
+        else:
+            path.unlink()
+    except OSError:
+        pass
 
 
 def run_command(
@@ -164,9 +184,12 @@ def run_command(
 
     Output goes to the temporary file for the whole operation and is returned
     (or written to ``output``). ``quiet`` discards it. On failure a CommandError
-    carries the status code and any partial output on its ``output`` attribute;
-    output redirection is restored and the temporary file removed regardless.
-    When an extended-error retrieval is configured on the session, its text is
+    carries the status code, the failing ``stage`` (``redirect``, ``command`` or
+    ``restore``) and any partial output on its ``output`` attribute; output
+    redirection is restored and the temporary directory removed regardless.
+    When the payload fails and the restoration fails too, the payload error is
+    what propagates, with the restoration status on ``restore_status``. When
+    an extended-error retrieval is configured on the session, its text is
     captured immediately at the failing status, before the redirection is
     restored, and attached as ``extended_text``.
     """
@@ -177,14 +200,19 @@ def run_command(
     if len(text) > MAX_COMMAND_BYTES:
         raise ValueError("The expanded command exceeds the maximum command size.")
     with owner.operation("command") as native:
-        handle, name = tempfile.mkstemp(prefix="famepy-", suffix=".out", dir=temp_dir)
-        os.close(handle)
-        path = Path(name)
+        # A private directory holds one fresh file name; the file itself does
+        # not exist until the library creates it through the redirection.
+        directory = Path(tempfile.mkdtemp(prefix="famepy-", dir=temp_dir))
+        path = directory / "output.txt"
         try:
             redirect = b'output file("' + _quote_path(path) + b'!")'
             status = native.execute(redirect)
             if status != HSUCC:
-                raise CommandError(status, extended_text=owner._capture_extended_error(native))
+                raise CommandError(
+                    status,
+                    stage="redirect",
+                    extended_text=owner._capture_extended_error(native),
+                )
             extended: bytes | None = None
             try:
                 status = native.execute(text)
@@ -192,18 +220,25 @@ def run_command(
                     extended = owner._capture_extended_error(native)
             finally:
                 restore = native.execute(b"output terminal")
-            captured = path.read_bytes()
+            captured = _captured_output(path)
             if status != HSUCC:
-                raise CommandError(status, output=captured, extended_text=extended)
+                raise CommandError(
+                    status,
+                    output=captured,
+                    extended_text=extended,
+                    stage="command",
+                    restore_status=None if restore == HSUCC else restore,
+                )
             if restore != HSUCC:
                 raise CommandError(
-                    restore, output=captured, extended_text=owner._capture_extended_error(native)
+                    restore,
+                    output=captured,
+                    extended_text=owner._capture_extended_error(native),
+                    stage="restore",
                 )
         finally:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            _remove_quietly(path)
+            _remove_quietly(directory)
     if output is not None:
         output.write(captured)
     return b"" if quiet else captured

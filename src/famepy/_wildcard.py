@@ -8,13 +8,27 @@ call to read them back, so the package cannot restore an arbitrary prior
 state. ``list_objects`` therefore *normalizes* the four options it uses
 (CLASS, TYPE, FREQUENCY, ALIAS) to ON when it finishes, whatever they were
 before. Commands that changed those options must set them again afterwards.
+
+The frequency filter is a package contract enforced on the metadata of the
+listed objects: an object is returned only when its frequency code is one
+of those requested. The ``ITEM FREQUENCY`` selection is still set natively
+(and any option error surfaces), but the first native campaign observed no
+effect from it on either host, so the package does not rely on it. Only
+exact frequency names or codes from the frequency table are accepted; a
+family word such as ``quarterly`` is refused rather than interpreted.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 
-from ._constants import NAME_CAPACITY, ObjectClass, ObjectType
+from ._constants import (
+    FREQUENCY_NAMES,
+    NAME_CAPACITY,
+    ObjectClass,
+    ObjectType,
+    frequency_code,
+)
 from ._database import Database
 from ._errors import (
     HNOOBJ,
@@ -64,6 +78,30 @@ def _values(option: str, values: Iterable[str] | str | None) -> list[bytes]:
     return result
 
 
+def _frequency_filter(values: Iterable[str | int] | str | int | None) -> set[int] | None:
+    """Exact frequency codes for the metadata filter, or None for no filter.
+
+    Names and integer codes are accepted; both must exist in the frequency
+    table, so a family word such as ``quarterly`` is refused.
+    """
+    if values is None:
+        return None
+    items = [values] if isinstance(values, (str, int)) else list(values)
+    codes: set[int] = set()
+    for item in items:
+        parts: list[object] = (
+            [part for part in item.split(",") if part.strip()] if isinstance(item, str) else [item]
+        )
+        for part in parts:
+            try:
+                codes.add(frequency_code(part))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "Unknown frequency filter value; use an exact frequency name or code."
+                ) from None
+    return codes or None
+
+
 def _normalize_options(native: object) -> list[FameError]:
     """Set every listing option to ON; attempt all of them and return failures."""
     failures: list[FameError] = []
@@ -82,13 +120,17 @@ def list_objects(
     alias: bool = True,
     classes: Iterable[str] | str | None = None,
     types: Iterable[str] | str | None = None,
-    frequencies: Iterable[str] | str | None = None,
+    frequencies: Iterable[str | int] | str | int | None = None,
     capacity: int = NAME_CAPACITY,
 ) -> list[ObjectInfo]:
     """List objects matching ``pattern`` with optional class/type/frequency filters.
 
     The ITEM options are set for the listing and normalized to ON afterwards
-    within the same locked operation (see the module note). Names longer than
+    within the same locked operation (see the module note). ``frequencies``
+    takes exact frequency names or codes; the result contains only objects
+    whose frequency code is one of them, whatever the native option did (a
+    scalar has the undefined frequency and is listed only when that is
+    requested). Names longer than
     ``capacity`` bytes raise NameTruncatedError with the returned length,
     because the cursor cannot re-fetch that entry. Scalars are re-queried with
     quick_info because the reference notes that wildcard ranges are unreliable
@@ -98,10 +140,13 @@ def list_objects(
     text = to_native(pattern, what="wildcard pattern")
     if isinstance(capacity, bool) or not isinstance(capacity, int) or not 1 <= capacity <= 2**20:
         raise DataValidationError("Name capacity must be between 1 and 2**20 bytes.")
+    wanted_codes = _frequency_filter(frequencies)
     filters = {
         "CLASS": _values("CLASS", classes),
         "TYPE": _values("TYPE", types),
-        "FREQUENCY": _values("FREQUENCY", frequencies),
+        "FREQUENCY": [
+            FREQUENCY_NAMES[code].upper().encode("ascii") for code in sorted(wanted_codes or ())
+        ],
     }
     results: list[ObjectInfo] = []
     with database.operation("list objects") as native:
@@ -140,6 +185,8 @@ def list_objects(
                     )
                     if info.class_code == ObjectClass.SCALAR:
                         info = query_info(native, key, entry.name)
+                    if wanted_codes is not None and info.frequency not in wanted_codes:
+                        continue
                     results.append(info)
             except BaseException as error:
                 cursor_failed = True
@@ -162,3 +209,40 @@ def list_objects(
             if cleanup_failures and not failed:
                 raise cleanup_failures[0]
     return results
+
+
+def native_listing_count(
+    database: Database, pattern: str | bytes, options: Iterable[tuple[bytes, bytes]]
+) -> int:
+    """How many entries the native wildcard yields under the given ITEM options.
+
+    A validation-campaign observation helper: it applies no package-side
+    filter, so it shows what the library's own option handling selected. The
+    options are normalized to ON afterwards, as ``list_objects`` does.
+    """
+    text = to_native(pattern, what="wildcard pattern")
+    count = 0
+    with database.operation("count native listing") as native:
+        failed = False
+        try:
+            for name, value in options:
+                native.set_option(name, value)
+            wildcard_key = native.init_wildcard(database.key, text)
+            try:
+                while True:
+                    entry = native.next_wildcard(wildcard_key, NAME_CAPACITY)
+                    if entry.status == HNOOBJ:
+                        break
+                    if entry.status not in (HSUCC, HTRUNC):
+                        check_status(entry.status, operation="fame_get_next_wildcard")
+                    count += 1
+            finally:
+                native.free_wildcard(wildcard_key)
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            cleanup_failures = _normalize_options(native)
+            if cleanup_failures and not failed:
+                raise cleanup_failures[0]
+    return count

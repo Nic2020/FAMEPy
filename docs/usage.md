@@ -78,7 +78,12 @@ famepy.run_command("input setup", base_dir=".", quiet=True)  # recursive INPUT e
 ```
 
 Listing leaves `ITEM CLASS`, `ITEM TYPE`, `ITEM FREQUENCY` and `ITEM ALIAS`
-set to ON afterwards (a documented normalization, not a restoration).
+set to ON afterwards (a documented normalization, not a restoration). The
+`frequencies` filter takes exact frequency names or codes (`"monthly"`, `129`,
+`["monthly", "case"]`) and is enforced on the listed metadata; `"quarterly"`
+alone is refused. A failed command raises `CommandError` whose `stage` says
+whether the output redirection, the command itself or the restoration
+returned the status; partial output stays on `error.output`.
 
 Extended error text is opt-in. With `session.extended_error_retrieval`
 configured from the installed header's declarations, a failure captures the

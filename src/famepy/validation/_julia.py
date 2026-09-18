@@ -2,8 +2,12 @@
 """Optional Julia differential checks for the bridge group.
 
 Requires a Julia executable and a project containing FAME.jl and
-TimeSeriesEcon. The script below is written to the scratch directory, run in
-a subprocess with a timeout and asked to print one JSON line. Numeric values
+TimeSeriesEcon. The script below is written to the scratch directory and run
+as a worker like the Python children: a fresh result path and token are
+reserved per launch, the script writes its JSON document atomically with the
+token and a completion marker, its standard streams go to a local log that
+is never parsed, and a missing, stale, partial or oversized result fails the
+case. The process tree is terminated on timeout. Numeric values
 are exchanged as IEEE bit patterns, not decimal spellings. The FAME.jl tree
 identity is compared with the pinned reference; a mismatch qualifies the
 comparison (reported as ``unsupported``) rather than passing silently. The
@@ -12,7 +16,6 @@ script does not modify any Julia project.
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 from pathlib import Path
@@ -23,6 +26,7 @@ import numpy as np
 import famepy
 from famepy import bridge
 
+from ._process import read_result, reserve_result, run_child
 from ._report import Case
 
 if TYPE_CHECKING:
@@ -49,12 +53,15 @@ end
 bits(v::Float64) = isnan(v) ? "nan" : string(reinterpret(UInt64, v), base=16, pad=16)
 json_string(s::AbstractString) = "\"" * replace(replace(s, "\\" => "\\\\"), "\"" => "\\\"") * "\""
 json_value(v::AbstractString) = json_string(v)
+json_value(v::Bool) = v ? "true" : "false"
 json_value(v::AbstractVector) = "[" * join(map(json_value, v), ",") * "]"
 json_object(d::Dict) = "{" * join([json_string(k) * ":" * json_value(v) for (k, v) in d], ",") * "}"
 
 python_path = ARGS[1]
 julia_path = ARGS[2]
-result = Dict{String,Any}("fame_tree_hash" => tree_hash())
+result_path = ARGS[3]
+token = ARGS[4]
+result = Dict{String,Any}("fame_tree_hash" => tree_hash(), "group" => "julia", "token" => token)
 
 # Read what Python wrote and echo the values as bit patterns.
 w = readfame(python_path, "ts", "sc")
@@ -64,7 +71,12 @@ result["python_sc_bits"] = bits(Float64(w.sc))
 
 # Write a monthly series and scalar for Python to read back.
 writefame(julia_path, Workspace(; jts=TSeries(2021M1, [1.0, NaN, 3.0]), jsc=7.5); mode=:create)
-println(json_object(result))
+result["complete"] = true
+part = result_path * ".part"
+open(part, "w") do io
+    print(io, json_object(result))
+end
+mv(part, result_path; force=true)
 """
 
 
@@ -80,6 +92,7 @@ def run_julia_differential(ctx: Context, python_path: Path) -> None:
     script = ctx.path("differential.jl")
     script.write_text(SCRIPT, encoding="ascii")
     julia_path = ctx.path("julia_written.db")
+    tokens = reserve_result(ctx.scratch, "julia")
     command = [
         ctx.julia["executable"],
         f"--project={ctx.julia['project']}",
@@ -87,15 +100,12 @@ def run_julia_differential(ctx: Context, python_path: Path) -> None:
         str(script),
         str(python_path),
         str(julia_path),
+        tokens["result"],
+        tokens["token"],
     ]
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            timeout=max(ctx.timeout, 300),
-            check=False,
-            encoding="utf-8",
-            errors="replace",
+        result = run_child(
+            command, "", max(ctx.timeout, 300), nested=True, output_path=Path(tokens["log"])
         )
     except (subprocess.TimeoutExpired, OSError) as error:
         r.add(
@@ -117,12 +127,17 @@ def run_julia_differential(ctx: Context, python_path: Path) -> None:
             )
         )
         return
-    try:
-        payload: dict[str, Any] = json.loads(result.stdout.strip().splitlines()[-1])
-        if not isinstance(payload, dict):
-            raise ValueError
-    except (ValueError, IndexError):
-        r.add(Case("julia_run", "fail", note="Julia output was not JSON"))
+    payload, kind = read_result(Path(tokens["result"]), tokens["token"])
+    if payload is not None and payload.get("group") != "julia":
+        payload, kind = None, "wrong_group"
+    if payload is None:
+        r.add(
+            Case(
+                "julia_run",
+                "fail",
+                note="Julia " + (kind or "invalid_result").replace("_", " "),
+            )
+        )
         return
     tree = payload.get("fame_tree_hash")
     tree = tree if isinstance(tree, str) and _TREE.match(tree) else None

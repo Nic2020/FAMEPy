@@ -12,7 +12,9 @@ merely not raising.
 
 from __future__ import annotations
 
+import hashlib
 import math
+import re
 import struct
 import traceback
 from collections.abc import Callable
@@ -22,6 +24,17 @@ from typing import Any
 import numpy as np
 
 STATUSES = ("pass", "fail", "blocked", "unsupported")
+
+# Bytes are rendered losslessly only when they are *permitted*: values the
+# runner itself constructed (every expected value of an assertion) or
+# sentinels a group registered. Permitted bytes appear as text when printable
+# in the report's own character set, as bounded hex otherwise, and as a
+# length plus digest beyond the hex bound. Any other bytes, which is what a
+# library returns when it disagrees with the fixture, are reduced to their
+# length: fitting a regex never makes unknown bytes safe to export.
+_PRINTABLE = re.compile(rb"^[A-Za-z0-9 _,.;:+={}\[\]()<>'-]{0,256}$")
+MAX_HEX_BYTES = 64
+_STAGE = re.compile(r"^[a-z_]{1,32}$")
 
 
 @dataclass
@@ -59,8 +72,14 @@ def _float_record(value: Any) -> Any:
     return {"bits": typed.tobytes().hex()}
 
 
-def encode_value(value: Any) -> Any:
-    """Make synthetic values JSON-safe; non-finite floats keep exact bits."""
+Permitted = frozenset[bytes] | set[bytes]
+
+
+def encode_value(value: Any, permitted: Permitted = frozenset()) -> Any:
+    """Make synthetic values JSON-safe; non-finite floats keep exact bits.
+
+    ``permitted`` names the byte values that may be rendered losslessly.
+    """
     if isinstance(value, bool) or value is None or isinstance(value, (int, str)):
         return value
     if isinstance(value, (float, np.floating)):
@@ -69,17 +88,48 @@ def encode_value(value: Any) -> Any:
         return int(value)
     if isinstance(value, np.bool_):
         return bool(value)
-    if isinstance(value, bytes):
-        return {"ascii": value.decode("ascii", errors="backslashreplace")}
+    if isinstance(value, (bytes, bytearray)):
+        return encode_bytes(bytes(value), permitted)
     if isinstance(value, (list, tuple)):
-        return [encode_value(item) for item in value]
+        return [encode_value(item, permitted) for item in value]
     if isinstance(value, dict):
-        return {str(key): encode_value(item) for key, item in value.items()}
+        return {str(key): encode_value(item, permitted) for key, item in value.items()}
     if isinstance(value, np.ndarray):
         if value.dtype.kind == "f":
             return [_float_record(item) for item in value]
-        return encode_value(value.tolist())
+        return encode_value(value.tolist(), permitted)
     return repr(type(value).__name__)
+
+
+def encode_bytes(value: bytes, permitted: Permitted = frozenset()) -> dict[str, Any]:
+    """Permitted bytes losslessly (text, bounded hex or digest); others by length."""
+    if value not in permitted:
+        return {"length": len(value), "unexpected_bytes": True}
+    if _PRINTABLE.fullmatch(value):
+        return {"ascii": value.decode("ascii")}
+    if len(value) <= MAX_HEX_BYTES:
+        return {"hex": value.hex()}
+    return {"length": len(value), "sha256": hashlib.sha256(value).hexdigest()}
+
+
+def collect_bytes(value: Any, into: set[bytes]) -> None:
+    """Gather every bytes value nested in a synthetic expected value."""
+    if isinstance(value, (bytes, bytearray)):
+        into.add(bytes(value))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            collect_bytes(item, into)
+    elif isinstance(value, dict):
+        for item in value.values():
+            collect_bytes(item, into)
+
+
+def _stage_note(error: BaseException) -> str | None:
+    """A short identifier of the failing stage when the error names one."""
+    stage = getattr(error, "stage", None)
+    if isinstance(stage, str) and _STAGE.fullmatch(stage):
+        return f"stage {stage}"
+    return None
 
 
 def _package_frames(error: BaseException) -> list[str]:
@@ -108,6 +158,15 @@ class Recorder:
 
     def __init__(self) -> None:
         self.cases: list[Case] = []
+        # Byte values that may appear losslessly in this recorder's records:
+        # expected values of assertions (synthetic by construction) and the
+        # sentinels a group registers with ``permit``.
+        self.permitted: set[bytes] = set()
+
+    def permit(self, *values: Any) -> None:
+        """Register runner-owned byte values (for example sentinels) as exportable."""
+        for value in values:
+            collect_bytes(value, self.permitted)
 
     def add(self, case: Case) -> Case:
         self.cases.append(case)
@@ -122,13 +181,20 @@ class Recorder:
     def fact(self, case_id: str, value: Any, *, note: str | None = None) -> Case:
         """Record an observation (never an assertion) with a synthetic value."""
         return self.add(
-            Case(case_id, "pass", actual=encode_value(value), note=note, observation=True)
+            Case(
+                case_id,
+                "pass",
+                actual=encode_value(value, self.permitted),
+                note=note,
+                observation=True,
+            )
         )
 
     def check(self, case_id: str, function: Callable[[], Any], *, note: str | None = None) -> Any:
         """Run ``function``; a return records pass, an exception records fail.
 
         The return value is handed back to the caller and never recorded.
+        Use ``ok`` when the function returns None and only success matters.
         """
         try:
             result = function()
@@ -140,7 +206,7 @@ class Recorder:
                     error_type=type(error).__name__,
                     status_code=_status_of(error),
                     errno=_errno_of(error),
-                    note=note,
+                    note=note or _stage_note(error),
                     frames=_package_frames(error),
                 )
             )
@@ -149,6 +215,11 @@ class Recorder:
             return None
         self.add(Case(case_id, "pass", note=note))
         return result
+
+    def ok(self, case_id: str, function: Callable[[], Any], *, note: str | None = None) -> bool:
+        """Like ``check`` but report whether the case passed (for None-returning steps)."""
+        self.check(case_id, function, note=note)
+        return self.cases[-1].id == case_id and self.cases[-1].status == "pass"
 
     def expect_error(
         self,
@@ -168,7 +239,7 @@ class Recorder:
                     "pass",
                     error_type=type(error).__name__,
                     status_code=_status_of(error),
-                    note=note,
+                    note=note or _stage_note(error),
                 )
             )
             return error
@@ -191,12 +262,15 @@ class Recorder:
 
     def equal(self, case_id: str, actual: Any, expected: Any, *, note: str | None = None) -> bool:
         ok = _equal(actual, expected)
+        # The expected side is the runner's own fixture, so its bytes are
+        # exportable; the actual side is rendered only where it matches them.
+        collect_bytes(expected, self.permitted)
         self.add(
             Case(
                 case_id,
                 "pass" if ok else "fail",
-                expected=encode_value(expected),
-                actual=encode_value(actual),
+                expected=encode_value(expected, self.permitted),
+                actual=encode_value(actual, self.permitted),
                 note=note,
             )
         )

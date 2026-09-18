@@ -113,16 +113,36 @@ class IncludeError(ValueError):
     """Recursive INPUT expansion failed; the message never contains file text."""
 
 
+COMMAND_STAGES = ("redirect", "command", "restore")
+
+
 class CommandError(FameError):
-    """A FAME command failed. Any captured output is kept on ``output`` only."""
+    """A FAME command failed. Any captured output is kept on ``output`` only.
+
+    ``stage`` names which of the three native calls returned the status:
+    ``redirect`` (output redirection to the temporary file), ``command`` (the
+    payload itself) or ``restore`` (``output terminal``). ``restore_status``
+    keeps the status of the restoration when the payload had already failed,
+    so the original failure is what propagates and nothing is lost.
+    """
 
     def __init__(
-        self, status: int, *, output: bytes | None = None, extended_text: bytes | None = None
+        self,
+        status: int,
+        *,
+        output: bytes | None = None,
+        extended_text: bytes | None = None,
+        stage: str = "command",
+        restore_status: int | None = None,
     ) -> None:
-        super().__init__(status, operation="command execution")
+        if stage not in COMMAND_STAGES:
+            raise ValueError("Unknown command stage.")
+        super().__init__(status, operation=f"command execution ({stage})")
         self.output = output
         self.extended_text = extended_text
         self.extended_captured = True
+        self.stage = stage
+        self.restore_status = restore_status
 
 
 def check_status(status: int, *, operation: str | None = None) -> None:

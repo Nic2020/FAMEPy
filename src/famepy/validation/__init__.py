@@ -15,7 +15,10 @@ every case it reported is well formed, every required case is present with
 status ``pass``, and no case failed or was blocked. The report contains
 versions, platform, artifact identity, symbol presence, per-group status with
 counts, exit codes and sanitized cases. It never contains paths, hostnames,
-raw native or loader text, or command payloads.
+raw native or loader text, or command payloads. Children report through a
+result file with a per-launch token, never through their standard streams,
+so native text printed by the library cannot corrupt or forge a result; the
+size of that stray text is recorded as a number only.
 """
 
 from __future__ import annotations
@@ -24,7 +27,6 @@ import datetime as dt
 import errno
 import hashlib
 import importlib.metadata
-import json
 import os
 import platform
 import re
@@ -40,23 +42,15 @@ import famepy
 from famepy._probe import failure_kind
 
 from ._groups import DEPENDENT_GROUPS, GROUPS, REQUIRED_CASES
-from ._process import run_child
+from ._process import launch_worker, reserve_result
 from ._report import STATUSES
+from ._schema import _ERROR_TYPE, sanitize_case
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
-_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_:.-]{0,159}$")
-_ERROR_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-_NOTE = re.compile(r"^[A-Za-z0-9 _,.;:()'+=-]{1,200}$")
-_TEXT = re.compile(r"^[A-Za-z0-9 _,.;:+={}\[\]()<>'-]{0,256}$")
-_KEY = re.compile(r"^[A-Za-z0-9_:. -]{1,64}$")
-_HEX = re.compile(r"^(?:[0-9a-f]{8}|[0-9a-f]{16})$")
-_FRAME = re.compile(r"^[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)*\.py:[A-Za-z0-9_<>]{1,80}$")
 _SOURCE_SHA = re.compile(r"^[0-9a-f]{7,64}(?:-dirty)?$")
 _ATTESTATION = re.compile(r"^[0-9a-f]{64}$")
 _WHEEL_NAME = re.compile(r"^[Ff][Aa][Mm][Ee][Pp][Yy]-[0-9A-Za-z.!+]+-py3-none-any\.whl$")
-_MAX_LIST = 512
-_MAX_DEPTH = 4
 
 
 def _hash_file(path: Path) -> str:
@@ -299,97 +293,6 @@ def preflight(
     return report
 
 
-# -- child result validation ------------------------------------------------
-
-
-def _clean_value(value: Any, depth: int = 0) -> tuple[bool, Any]:
-    """Accept only synthetic-looking values: numbers, short safe strings, bits."""
-    if value is None or isinstance(value, bool):
-        return True, value
-    if isinstance(value, int):
-        return -(2**63) <= value < 2**63, value
-    if isinstance(value, float):
-        return value == value and value not in (float("inf"), float("-inf")), value
-    if isinstance(value, str):
-        return bool(_TEXT.fullmatch(value)), value
-    if depth >= _MAX_DEPTH:
-        return False, None
-    if isinstance(value, list):
-        if len(value) > _MAX_LIST:
-            return False, None
-        cleaned = []
-        for item in value:
-            ok, clean = _clean_value(item, depth + 1)
-            if not ok:
-                return False, None
-            cleaned.append(clean)
-        return True, cleaned
-    if isinstance(value, dict):
-        if set(value) == {"bits"}:
-            return isinstance(value["bits"], str) and bool(_HEX.fullmatch(value["bits"])), value
-        if set(value) == {"ascii"}:
-            return isinstance(value["ascii"], str) and bool(_TEXT.fullmatch(value["ascii"])), value
-        if len(value) > 32:
-            return False, None
-        cleaned_dict: dict[str, Any] = {}
-        for key, item in value.items():
-            if not isinstance(key, str) or not _KEY.fullmatch(key):
-                return False, None
-            ok, clean = _clean_value(item, depth + 1)
-            if not ok:
-                return False, None
-            cleaned_dict[key] = clean
-        return True, cleaned_dict
-    return False, None
-
-
-def _sanitize_case(case: Any) -> dict[str, Any]:
-    """Validate one child case against the schema; malformed records fail."""
-    malformed = {"id": "malformed", "status": "fail", "note": "malformed case record"}
-    if not isinstance(case, dict):
-        return malformed
-    case_id = case.get("id")
-    if not isinstance(case_id, str) or not _ID.fullmatch(case_id):
-        return malformed
-    status = case.get("status")
-    if not isinstance(status, str) or status not in STATUSES:
-        return {**malformed, "id": case_id}
-    clean: dict[str, Any] = {"id": case_id, "status": status}
-    for key in ("error_type", "note"):
-        if key in case:
-            value = case[key]
-            pattern = _ERROR_TYPE if key == "error_type" else _NOTE
-            if not isinstance(value, str) or not pattern.fullmatch(value):
-                return {**malformed, "id": case_id}
-            clean[key] = value
-    for key in ("status_code", "errno"):
-        if key in case:
-            value = case[key]
-            if not isinstance(value, int) or isinstance(value, bool) or abs(value) >= 2**32:
-                return {**malformed, "id": case_id}
-            clean[key] = value
-    for key in ("expected", "actual"):
-        if key in case:
-            ok, value = _clean_value(case[key])
-            if not ok:
-                return {**malformed, "id": case_id}
-            clean[key] = value
-    if "frames" in case:
-        frames = case["frames"]
-        if (
-            not isinstance(frames, list)
-            or len(frames) > 8
-            or not all(isinstance(f, str) and _FRAME.fullmatch(f) for f in frames)
-        ):
-            return {**malformed, "id": case_id}
-        clean["frames"] = frames
-    if "observation" in case:
-        if case["observation"] is not True:
-            return {**malformed, "id": case_id}
-        clean["observation"] = True
-    return clean
-
-
 def _group_status(record: dict[str, Any], required: tuple[str, ...]) -> str:
     cases = record["cases"]
     statuses = {case["id"]: case["status"] for case in cases}
@@ -439,8 +342,11 @@ def _run_child(group: str, options: dict[str, Any], run_dir: Path) -> dict[str, 
     command = [sys.executable, "-m", "famepy.validation._child", "--group", group]
     started = time.monotonic()
     record: dict[str, Any] = {"status": "fail", "cases": [], "counts": {}}
+    tokens = reserve_result(scratch, group)
     try:
-        result = run_child(command, json.dumps(config), float(options.get("timeout", 120.0)) * 4)
+        result = launch_worker(
+            command, config, float(options.get("timeout", 120.0)) * 4, tokens=tokens
+        )
     except subprocess.TimeoutExpired:
         record.update(timed_out=True, exit_code=None, exit_kind="timeout")
         record["duration_seconds"] = round(time.monotonic() - started, 3)
@@ -451,38 +357,38 @@ def _run_child(group: str, options: dict[str, Any], run_dir: Path) -> dict[str, 
     record["duration_seconds"] = round(time.monotonic() - started, 3)
     record["exit_code"] = result.returncode
     record["timed_out"] = False
+    # Text the child (or the library through it) wrote to its streams stays
+    # in the local log; only its size is reported.
+    record["stray_output_bytes"] = result.log_bytes + result.pipe_bytes
     if result.returncode not in (0, 32):
         record["exit_kind"] = {
             30: "invalid_configuration",
             31: "backend_setup_failed",
             33: "manifest_invalid",
         }.get(result.returncode, failure_kind(result.returncode, sys.platform))
-        if result.returncode == 31:
-            try:
-                details = json.loads(result.stdout)
-                for key in ("setup_error", "status_code", "errno", "winerror"):
-                    value = details.get(key)
-                    if isinstance(value, str) and _ERROR_TYPE.fullmatch(value):
-                        record[key] = value
-                    elif isinstance(value, int) and not isinstance(value, bool):
-                        record[key] = value
-            except (ValueError, AttributeError):
-                pass
+        if result.returncode == 31 and result.payload is not None:
+            for key in ("setup_error", "status_code", "errno", "winerror"):
+                value = result.payload.get(key)
+                if isinstance(value, str) and _ERROR_TYPE.fullmatch(value):
+                    record[key] = value
+                elif isinstance(value, int) and not isinstance(value, bool):
+                    record[key] = value
         return record
-    try:
-        payload = json.loads(result.stdout)
-        if not isinstance(payload, dict) or payload.get("group") != group:
-            raise ValueError
-        cases = payload["cases"]
-        if not isinstance(cases, list):
-            raise ValueError
-    except (ValueError, KeyError, TypeError):
-        record["exit_kind"] = "invalid_output"
+    payload = result.payload
+    if payload is None:
+        record["exit_kind"] = result.result_kind or "invalid_result"
+        return record
+    if payload.get("group") != group:
+        record["exit_kind"] = "wrong_group"
+        return record
+    cases = payload.get("cases")
+    if not isinstance(cases, list):
+        record["exit_kind"] = "invalid_result"
         return record
     if not cases:
         record["exit_kind"] = "empty_cases"
         return record
-    record["cases"] = [_sanitize_case(case) for case in cases]
+    record["cases"] = [sanitize_case(case) for case in cases]
     record["counts"] = {
         status: sum(1 for c in record["cases"] if c.get("status") == status) for status in STATUSES
     }
@@ -574,6 +480,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "abi_table_sha256",
     "classify_import",
+    "sanitize_case",
     "package_identity",
     "preflight",
     "reserve_scratch",

@@ -11,6 +11,14 @@
  *   910 bad mode             911 name too long
  * Reference-derived statuses: 0 success, 3 already finished, 13 no object, 18 truncated, 67 bad
  * option, 513 command error (extended text available).
+ *
+ * Behaviors observed on both protected hosts and modeled on purpose: the string
+ * missing sentinels are two bytes that are not ASCII text; an ITEM FREQUENCY
+ * selection is accepted but does not narrow the wildcard; "display" output goes
+ * to the C-level stdout while no redirection is active; the redirection creates
+ * its output file. Endpoint handling of missing observations and the write /
+ * direct-write prerequisites are not established, so the shim stores what it is
+ * given and accepts every mode on an existing store.
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdint.h>
@@ -63,9 +71,10 @@ API int64_t FAME_INDEX_ND = -4611686018427387907LL;
 API double FPRCNC, FPRCNA, FPRCND;
 API float FNUMNC, FNUMNA, FNUMND;
 API int32_t FBOONC = -2147483647, FBOONA = -2147483646, FBOOND = -2147483645;
-API char FSTRNC[3] = "NC";
-API char FSTRNA[3] = "NA";
-API char FSTRND[3] = "ND";
+/* Two-byte non-ASCII string sentinels (synthetic, not vendor values). */
+API char FSTRNC[3] = "\xfe\x01";
+API char FSTRNA[3] = "\xfe\x02";
+API char FSTRND[3] = "\xfe\x03";
 
 typedef struct {
     int used;
@@ -127,6 +136,11 @@ static void init_globals(void) {
     w = 0x7FC00101u; memcpy(&FNUMNC, &w, 4);
     w = 0x7FC00102u; memcpy(&FNUMNA, &w, 4);
     w = 0x7FC00103u; memcpy(&FNUMND, &w, 4);
+}
+
+static int string_missing(const char *value) {
+    return strcmp(value, FSTRNC) == 0 ? 1 : strcmp(value, FSTRNA) == 0 ? 2
+           : strcmp(value, FSTRND) == 0 ? 3 : 0;
 }
 
 static int globals_ready = 0;
@@ -280,7 +294,9 @@ API void cfmfame(int32_t *status, const char *command) {
     if (strncmp(command, "display ", 8) == 0) {
         long left, right;
         if (sscanf(command + 8, "%ld+%ld", &left, &right) == 2) {
-            if (output) { fprintf(output, "%ld\n", left + right); fflush(output); }
+            /* Without a redirection the "terminal" is the process stdout. */
+            fprintf(output ? output : stdout, "%ld\n", left + right);
+            fflush(output ? output : stdout);
             *status = 0;
             return;
         }
@@ -587,8 +603,7 @@ API int32_t fame_get_strings(int32_t key, const char *name, const TestRange *ran
         memcpy(values[k], src, used);
         values[k][used] = '\0';
         lengths[k] = (int32_t)full;
-        if (missing) missing[k] = strcmp(src, "NC") == 0 ? 1 : strcmp(src, "NA") == 0 ? 2
-                                  : strcmp(src, "ND") == 0 ? 3 : 0;
+        if (missing) missing[k] = string_missing(src);
     }
     return 0;
 }
@@ -678,10 +693,10 @@ API int32_t fame_init_wildcard(int32_t key, int32_t *cursor_key, const char *pat
             cursors[c].used = 1; cursors[c].position = 0; cursors[c].count = 0; cursors[c].db = key;
             for (k = 0; k < MAX_OBJ; ++k) {
                 Object *o = &h->objects[k];
+                /* ITEM FREQUENCY selections are recorded but not applied (observed). */
                 if (o->used && match(pattern, o->name)
                     && option_allows(0, o->cls == 1 ? "SERIES" : "SCALAR")
-                    && option_allows(1, type_label(o->type))
-                    && option_allows(2, freq_label(o->freq)))
+                    && option_allows(1, type_label(o->type)))
                     cursors[c].object_index[cursors[c].count++] = k;
             }
             *cursor_key = c;
@@ -744,8 +759,7 @@ API void cfmisbm(int32_t *status, int32_t value, int32_t *type) {
 
 API void cfmissm(int32_t *status, const char *value, int32_t *type) {
     CFM_ENTER(status);
-    *type = strcmp(value, "NC") == 0 ? 1 : strcmp(value, "NA") == 0 ? 2
-            : strcmp(value, "ND") == 0 ? 3 : 0;
+    *type = string_missing(value);
     *status = 0;
 }
 

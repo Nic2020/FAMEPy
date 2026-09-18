@@ -94,8 +94,35 @@ Execution order and gates:
    used by the groups come from the library's own year/period conversion.
    Persistence is verified by a further child that reopens the database
    read-only and compares class, type, frequency, range and exact value bits
-   against a manifest. The Julia differential runs inside `bridge` when
-   configured and is otherwise reported as unsupported.
+   against a manifest (string values travel as hex, so non-ASCII sentinel
+   bytes and empty strings are compared exactly). The Julia differential
+   runs inside `bridge` when configured and is otherwise reported as
+   unsupported.
+
+Within `raw_matrix`, every object is built and validated before the database
+is created, then written, read and verified as its own case inside its own
+exception boundary (`verify_object:<name>`); one object that cannot be
+created, or whose verification raises, fails its own cases, blocks the cases
+that depend on it (`prerequisite case did not pass`) and leaves the others
+untouched. Replacement and deletion use fixtures of their own. Interior
+missing values (NC/NA/ND between normal endpoints) are asserted for every
+type; endpoint fixtures (leading and trailing ND, NC and NA, and all ND, for
+each type) record the persisted range and classification codes as
+observations and assert that whatever was retained lies inside the written
+range and equals, index by index, what was written there (an invented value,
+a changed missing code or a shifted range fails), that the normal value keeps
+its position, and that an explicit read of the stored range agrees. Their
+cross-process manifest is built from the written values over the retained
+indices, never from what was read back. Which endpoint rule the library
+applies remains an open vendor question; these checks establish
+preservation, not the rule. Within `database`, the
+`write` and `direct_write` modes use their own fixtures: an existing database
+(open, write, post, reopen and list; required) and a path that does not
+exist yet (recorded as an observation). Within `discovery`, the frequency
+filter is checked as exact sets over mixed frequencies and scalars, invalid
+input is refused, and the count the native wildcard yields under the
+`ITEM FREQUENCY` selection alone is recorded as an observation. Within
+`commands`, a failing case names the stage that returned the status.
 
 Compare every row of the [per-function checklist](abi-checklist.md) with the
 installed header before the first run, record the conclusions per row in a
@@ -110,7 +137,19 @@ groups. Injected offline backends are exempt from this native-only gate.
 
 ## How a group passes
 
-The parent trusts nothing a child prints. A group passes only when its child
+The parent never reads a child's standard streams for results. Each launch
+reserves a result file and a token inside the group's scratch directory;
+the child redirects its stdout and stderr descriptors to a local log before
+anything native runs (so text the library prints stays there), writes its
+result atomically and echoes the token. A missing, unreadable, malformed,
+partial, stale (wrong token) or wrong-group result fails the group with a
+matching `exit_kind`; the size of any stray stream output is reported as
+`stray_output_bytes`, never its content. Nested verification children and
+the Julia differential use the same protocol (fresh token and result path
+per launch, atomic completion, expected group, size bound, process-tree
+timeout), and a group child validates every nested case against the same
+schema before adopting it, keeping the observation flag so that an
+observation can never satisfy a required assertion. A group passes only when its child
 exited cleanly, every reported case is well formed, every required case for
 that group is present with status `pass`, and no case failed or was blocked.
 Duplicate case identifiers, required cases marked only as observations,
@@ -124,9 +163,14 @@ are not assertions are marked `observation`.
 
 The self-test in the package's own test suite drives the runner with
 intentionally faulty backends (wrong version, NaN payloads lost, posts
-discarded, private markers in native output, a hanging initialization) and
-with adversarial child payloads; each must yield `FAIL` or `BLOCKED`, and no
-synthetic private marker may reach the final report.
+discarded, private markers in native output, a hanging initialization, one
+object that cannot be created, a classifier that fails inside one object,
+corrupted endpoint reads, refused write modes, refused redirections,
+failed restorations, a lost endpoint neighbour) and with adversarial child
+payloads and results; each must yield `FAIL` or `BLOCKED`, and no synthetic
+private marker may reach the final report. Backends that print forged
+results and diagnostics to the C-level streams, or that apply a different
+endpoint rule, must still pass with only their observations changed.
 
 ## Report contents
 
@@ -136,10 +180,14 @@ timeouts, and per-case records limited to identifiers, statuses, error class
 names, numeric CHLI statuses, OS error numbers, and synthetic expected/actual
 values. Every case is validated against a field and value schema in the
 parent: strings are short and free of path separators, floats that are not
-finite appear only as bit patterns, and anything else is replaced by a
-`malformed case record` failure. Command output never enters the report;
-command cases record predicates only. Review the report before transferring
-it anywhere.
+finite appear only as bit patterns, and bytes are rendered losslessly
+(printable ASCII, bounded hex of at most 64 bytes, or a length and digest
+beyond that) only when the runner constructed them itself: the expected side
+of an assertion and the sentinels a group registers. Any other bytes, which
+is what the library returns when it disagrees with a fixture, are reduced to
+their length. Anything else is replaced by a `malformed case record` failure. Command
+output never enters the report; command cases record predicates only.
+Review the report before transferring it anywhere.
 
 Retain with the report: the exact source revision and any working-tree diff,
 the wheel hash, library version and OS/architecture, dependency versions and
@@ -149,7 +197,8 @@ the command used. On a retry after a fix, record the changed identity.
 
 When `--julia` is given, the bridge group writes a script that reads the
 Python-written database with FAME.jl and reports values as IEEE bit patterns,
-then writes a database for Python to read back. The FAME.jl tree identity is
+then writes a database for Python to read back; its result travels through
+the worker result-file protocol. The FAME.jl tree identity is
 compared with the pinned reference; a different tree qualifies the comparison
 (the case is reported `unsupported`, the value comparisons carry a note) so
 that a mismatch is visible and never a silent pass.

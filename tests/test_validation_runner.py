@@ -17,7 +17,7 @@ import famepy
 from famepy import validation
 from famepy.validation import _groups, _report
 from famepy.validation.__main__ import main
-from famepy.validation._process import Completed
+from famepy.validation._process import WorkerResult, read_result
 
 TESTS = Path(__file__).resolve().parent
 
@@ -233,7 +233,7 @@ def test_lifecycle_failure_blocks_dependent_groups(tmp_path, child_env):
             "make_nan_canonicalizing_backend",
             ["lifecycle", "raw_matrix"],
             "raw_matrix",
-            "read:p_series",
+            "values:p_series",
         ),
         (
             "make_nonpersisting_backend",
@@ -266,14 +266,23 @@ def test_finite_sentinel_profile_passes_every_group(tmp_path, child_env):
     assert lifecycle["precision_sentinels_are_nan"]["observation"] is True
 
 
+def _worker(payload, returncode=0, kind=None):
+    """A launch_worker replacement that hands the parent a finished result."""
+
+    def launch(command, config, timeout, *, tokens, nested=False):
+        return WorkerResult(returncode, payload, kind, tokens=tokens)
+
+    return launch
+
+
 def test_restart_requiring_child_payload_is_rejected(tmp_path, monkeypatch):
     """A child reporting the old restart cases cannot satisfy the required set."""
     cases = [{"id": "reinitialize", "status": "pass"}, {"id": "initialize", "status": "pass"}]
-
-    def fake_run_child(command, input_text, timeout, **kwargs):
-        return Completed(0, json.dumps({"group": "lifecycle", "cases": cases, "counts": {}}))
-
-    monkeypatch.setattr(validation, "run_child", fake_run_child)
+    monkeypatch.setattr(
+        validation,
+        "launch_worker",
+        _worker({"group": "lifecycle", "cases": cases, "counts": {}}),
+    )
     report = validation.run(_options(tmp_path, "make_validation_backend", ["lifecycle"]))
     assert report["result"] == "FAIL"
     assert "fresh_process:initialize" in report["groups"]["lifecycle"]["required_missing"]
@@ -313,7 +322,7 @@ def test_private_markers_never_reach_the_final_report(tmp_path, child_env):
 
 
 def test_case_schema_rejects_unsafe_values():
-    sanitize = validation._sanitize_case
+    sanitize = validation.sanitize_case
     malformed = "malformed case record"
     assert sanitize("nope")["note"] == malformed
     assert (
@@ -381,8 +390,12 @@ def _all_required(status_override=None):
         (_payload([]), "fail", "FAIL", "empty_cases"),
         (_payload(_all_required({"version": "ok"})), "fail", "FAIL", "malformed_cases"),
         (_payload([{"id": "initialize", "status": "pass"}]), "fail", "FAIL", "required_missing"),
-        (_payload(_all_required(), group="database"), "fail", "FAIL", "invalid_output"),
-        ("not json", "fail", "FAIL", "invalid_output"),
+        (_payload(_all_required(), group="database"), "fail", "FAIL", "wrong_group"),
+        ("missing_result", "fail", "FAIL", "missing_result"),
+        ("invalid_result", "fail", "FAIL", "invalid_result"),
+        ("stale_result", "fail", "FAIL", "stale_result"),
+        ("partial_result", "fail", "FAIL", "partial_result"),
+        ({"group": "lifecycle", "cases": "no"}, "fail", "FAIL", "invalid_result"),
         (32, "fail", "FAIL", "group_exception"),
         (
             _payload(_all_required() + [{"id": "x", "status": "pass", "actual": "/private"}]),
@@ -395,19 +408,26 @@ def _all_required(status_override=None):
 def test_child_payload_gates(
     tmp_path, monkeypatch, child, expected_status, expected_result, marker
 ):
-    def fake_run_child(command, input_text, timeout):
-        if isinstance(child, int):
-            return Completed(child, json.dumps(_payload(_all_required())))
-        if isinstance(child, str):
-            return Completed(0, child)
-        return Completed(0, json.dumps(child))
-
-    monkeypatch.setattr(validation, "run_child", fake_run_child)
+    if isinstance(child, int):
+        launch = _worker(_payload(_all_required()), returncode=child)
+    elif isinstance(child, str):
+        launch = _worker(None, kind=child)
+    else:
+        launch = _worker(child)
+    monkeypatch.setattr(validation, "launch_worker", launch)
     report = validation.run(_options(tmp_path, "make_validation_backend", ["lifecycle"]))
     record = report["groups"]["lifecycle"]
     assert record["status"] == expected_status
     assert report["result"] == expected_result
-    if marker in ("empty_cases", "invalid_output", "group_exception"):
+    if marker in (
+        "empty_cases",
+        "group_exception",
+        "wrong_group",
+        "missing_result",
+        "invalid_result",
+        "stale_result",
+        "partial_result",
+    ):
         assert record["exit_kind"] == marker
     elif marker is not None:
         assert record[marker]
@@ -460,7 +480,26 @@ def test_child_exit_codes_for_bad_input(tmp_path):
         command, input=config, capture_output=True, text=True, timeout=60, env=_environment()
     )
     assert result.returncode == 31
+    # Without a result path (a worker run by hand) the document is printed.
     assert json.loads(result.stdout)["setup_error"] == "AttributeError"
+    # With one, the streams carry nothing and the result file carries the token.
+    result_path = tmp_path / "r.json"
+    config = json.dumps(
+        {
+            "scratch": str(tmp_path),
+            "backend": "fake_native:missing_factory",
+            "result": str(result_path),
+            "log": str(tmp_path / "r.log"),
+            "token": "t" * 32,
+        }
+    )
+    result = subprocess.run(
+        command, input=config, capture_output=True, text=True, timeout=60, env=_environment()
+    )
+    assert result.returncode == 31 and result.stdout == "" and result.stderr == ""
+    payload, kind = read_result(result_path, "t" * 32)
+    assert kind is None and payload["setup_error"] == "AttributeError"
+    assert payload["complete"] is True
 
 
 def test_recorder_records_no_return_values():
@@ -485,7 +524,15 @@ def test_recorder_records_no_return_values():
     fact = recorder.fact("obs", 3)
     assert fact.observation and fact.to_json()["observation"] is True
     assert recorder.counts() == {"pass": 4, "fail": 3, "blocked": 0, "unsupported": 0}
-    assert _report.encode_value(b"\xff") == {"ascii": "\\xff"}
+    # Bytes are rendered losslessly only when permitted (runner-owned values).
+    assert _report.encode_value(b"\xff") == {"length": 1, "unexpected_bytes": True}
+    allowed = {b"\xff", b"", b"ok", b"\t", b"\xff" * 65}
+    assert _report.encode_value(b"\xff", allowed) == {"hex": "ff"}
+    assert _report.encode_value(b"", allowed) == {"ascii": ""}
+    assert _report.encode_value(bytearray(b"ok"), allowed) == {"ascii": "ok"}
+    assert _report.encode_value(b"\t", allowed) == {"hex": "09"}
+    digest = _report.encode_value(b"\xff" * 65, allowed)
+    assert set(digest) == {"length", "sha256"} and digest["length"] == 65
     assert _report.encode_value(float("inf")) == {"bits": "000000000000f07f"}
     assert _report.encode_value(np.float32(1.5)) == 1.5
     assert _report.encode_value(np.array([SENTINELS.numeric_nc]))[0] == {"bits": "0101c07f"}

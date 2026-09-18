@@ -3,7 +3,7 @@ import ctypes as ct
 import os
 
 import pytest
-from fake_native import S_ALREADY_INITIALIZED, S_NOT_INITIALIZED, FakeStatus, make_fake
+from fake_native import S_ALREADY_INITIALIZED, S_NOT_INITIALIZED, SENTINELS, FakeStatus, make_fake
 
 import famepy
 from famepy import (
@@ -72,7 +72,7 @@ def test_sentinels_only_after_initialization(fake):
     with pytest.raises(RuntimeStateError, match="initialized"):
         owner.version()
     owner.initialize()
-    assert owner.sentinels.string_nc == b"NC"
+    assert owner.sentinels.string_nc == SENTINELS.string_nc and not SENTINELS.string_nc.isascii()
     owner.finalize()
     with pytest.raises(RuntimeStateError):
         _ = owner.sentinels
