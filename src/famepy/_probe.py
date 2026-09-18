@@ -6,7 +6,7 @@ import json
 import sys
 from typing import Any
 
-from ._abi import GLOBALS, SIGNATURES
+from ._abi import GLOBALS, PRESENCE_ONLY, SIGNATURES
 from ._discovery import discover
 from ._errors import LibraryLoadError, LibraryNotFoundError, UnsupportedPlatformError
 from ._runtime import Runtime
@@ -69,10 +69,12 @@ def suppress_error_dialogs() -> None:
         set_mode(get_mode() | 0x8003)
 
 
-def probe_library(library: str) -> dict[str, Any]:
-    owner = Runtime(discover(library))
+def probe_library(library: str, root: str | None = None) -> dict[str, Any]:
+    owner = Runtime(discover(library, root=root))
     native = owner.load()
     functions = {name: hasattr(native, name) for name in SIGNATURES}
+    # Presence-only symbols are reported separately; no declaration is attached.
+    presence = {name: hasattr(native, name) for name in PRESENCE_ONLY}
     globals_found = {}
     for name in GLOBALS:
         try:
@@ -81,13 +83,16 @@ def probe_library(library: str) -> dict[str, Any]:
             globals_found[name] = True
         except ValueError:
             globals_found[name] = False
-    return {"functions": functions, "globals": globals_found}
+    return {"functions": functions, "globals": globals_found, "presence_only": presence}
 
 
 def main() -> int:
     try:
         request = json.load(sys.stdin)
         if not isinstance(request, dict) or not isinstance(request.get("library"), str):
+            return 21
+        root = request.get("root")
+        if root is not None and not isinstance(root, str):
             return 21
     except (ValueError, OSError):
         return 21
@@ -96,7 +101,7 @@ def main() -> int:
     except Exception:
         return 25
     try:
-        result = probe_library(request["library"])
+        result = probe_library(request["library"], root)
     except LibraryLoadError as error:
         print(json.dumps({"errno": error.errno, "winerror": error.winerror}))
         return 23

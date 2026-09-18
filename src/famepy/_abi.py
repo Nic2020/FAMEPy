@@ -72,6 +72,31 @@ SIGNATURES: dict[str, Signature] = {
     "fame_date_missing_type": Signature("fame", (J, PI)),
 }
 
+# Declared in the installed headers on both inspected installations, needed to
+# size extended-error buffers, but its exact signature is not yet established.
+# Presence is probed; no call is made until a verified declaration exists.
+PRESENCE_ONLY = ("cfmlerr",)
+
+# Candidate declared C types of the native globals (reference usage). Numeric
+# globals are read after initialization; string globals are three-byte arrays.
+GLOBAL_TYPES: dict[str, Any] = {
+    "FAME_INDEX_NC": J,
+    "FAME_INDEX_NA": J,
+    "FAME_INDEX_ND": J,
+    "FPRCNC": ct.c_double,
+    "FPRCNA": ct.c_double,
+    "FPRCND": ct.c_double,
+    "FNUMNC": ct.c_float,
+    "FNUMNA": ct.c_float,
+    "FNUMND": ct.c_float,
+    "FBOONC": INT32,
+    "FBOONA": INT32,
+    "FBOOND": INT32,
+    "FSTRNC": ct.c_char * 3,
+    "FSTRNA": ct.c_char * 3,
+    "FSTRND": ct.c_char * 3,
+}
+
 GLOBALS = tuple(
     [f"FAME_INDEX_{kind}" for kind in ("NC", "NA", "ND")]
     + [

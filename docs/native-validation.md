@@ -1,10 +1,12 @@
 # Native validation
 
-There are three separate kinds of evidence: Python tests, an independent C shim,
-and actual FAME execution. Only the first two can run without a licensed FAME
-installation. Passing them is not evidence that vendor calls are correct.
+Three kinds of evidence exist: Python tests with the in-memory fake backend,
+the independent C shim, and actual FAME execution. Only the first two run
+without a licensed installation, and passing them is not evidence that vendor
+calls are correct. The fake and the shim implement the package's own
+contracts, not FAME behavior.
 
-## Discovery available now
+## Discovery
 
 After installing the package, run from outside the source tree:
 
@@ -13,90 +15,150 @@ python -m famepy
 python -m famepy --probe
 ```
 
-Configure `FAME` or an absolute `FAMEPY_LIBRARY` path first. Discovery is read-only
-and does not load CHLI; `--probe` loads it in a subprocess and locates symbols.
-Neither calls initialization, version, date conversion or any database operation.
-The timeout defaults to 15 seconds. `--library` overrides environment discovery.
-Missing FAME produces JSON and exit code one, never a successful integration test.
-
-Do not paste private paths into shared commands. Reports omit paths and raw loader
-output. Keep all vendor headers, libraries and help files in their installation.
+Configure `FAME` or an absolute `FAMEPY_LIBRARY` path first (`--root` names
+the trusted installation root for an explicit library). Discovery is
+read-only; `--probe` loads the library in a subprocess and locates symbols,
+including presence-only symbols (`cfmlerr`). Neither calls initialization.
+Missing FAME produces JSON and exit code one, never a successful test.
 
 ## Interpreting probe failures
 
-The public CLI still exits one on failure; `probe_exit_code` is the separate
-child exit code. Schema version 2 adds these `probe_failure_kind` values when
-status is `probe_failed`:
+`probe_failure_kind` values: `package_import_failed` (20), `invalid_request`
+(21), `discovery_failed` (22), `library_load_failed` (23), `child_exception`
+(24), `child_setup_failed` (25), `signal_exit`, `windows_exception_exit` or
+`unclassified_exit`. Load failures also report `load_errno`, `load_winerror`
+and a conservative `load_error_class`. Timeout, start failure and invalid
+child output keep their own statuses. No filename or message parsing is used.
 
-| Child exit | Failure kind | Meaning |
-|---|---|---|
-| 20 | package_import_failed | The child bootstrap could not import the package |
-| 21 | invalid_request | Invalid internal request data |
-| 22 | discovery_failed | The child's discovery could not locate a supported library |
-| 23 | library_load_failed | The operating system rejected native loading |
-| 24 | child_exception | Another exception during symbol probing |
-| 25 | child_setup_failed | Child error-mode setup failed before loading CHLI |
-| Negative POSIX exit | signal_exit | A signal terminated the child |
-| Windows exception code | windows_exception_exit | A Windows exception-style exit code |
-| Other nonzero exit | unclassified_exit | Cause unknown; retain the numeric code |
+## The consolidated campaign
 
-Native load failures also report `load_errno`, `load_winerror` (integer or null)
-and `load_error_class`. The classes are `library_or_dependency_not_found`,
-`bad_image`, `initialization_failed`, `access_denied`, or `other`. These are
-conservative numeric hints, not proof of one root cause: a missing library and
-a missing dependency can share an error code; `bad_image` need not mean only
-wrong architecture. `initialization_failed` refers to OS library initialization,
-not a call to CHLI initialization. POSIX loader errors often have no numeric
-code, so they may correctly remain `other`. No filename/message parsing is used.
+One entry point runs the whole native campaign and writes one sanitized JSON
+report. Build a wheel from the reviewed revision, hash it, install it in an
+isolated environment and run from a directory outside the checkout:
 
-Timeout, process-start failure and invalid child output retain their existing
-`probe_timeout`, `probe_start_failed` and `probe_invalid_output` statuses.
-If native output corrupts the JSON, numeric details may be unavailable; do not
-paste raw stdout/stderr to compensate. Record the exact artifact and failure kind.
+Windows (PowerShell):
 
-The Windows child requests suppression of system error dialogs before loading
-CHLI and preserves inherited error-mode bits. The parent process is unchanged.
-This does not control dialogs deliberately displayed by vendor code. See
-[Windows error-mode documentation](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-seterrormode).
+```powershell
+python -m pip wheel --no-deps -w .\wheelhouse <path-to-checkout>
+Get-FileHash .\wheelhouse\famepy-*.whl -Algorithm SHA256
+python -m pip install .\wheelhouse\famepy-*.whl
+python -m famepy.validation --native --scratch .\famepy-scratch --report .\famepy-report.json `
+  --wheel .\wheelhouse\famepy-<version>-py3-none-any.whl --source-sha <revision> `
+  --abi-attestation <sha256-of-the-checklist-review-record>
+```
 
-## ABI review before database tests
+Linux (bash):
 
-The candidate signatures in `src/famepy/_abi.py` come from FAME.jl revision
-`30586743f1c1bed549841e0309410da0134f3014`. They have not been checked against
-installed vendor headers. Review every function used by a test before calling it:
+```sh
+python -m pip wheel --no-deps -w ./wheelhouse <path-to-checkout>
+sha256sum ./wheelhouse/famepy-*.whl
+python -m pip install ./wheelhouse/famepy-*.whl
+python -m famepy.validation --native --scratch ./famepy-scratch --report ./famepy-report.json \
+  --wheel ./wheelhouse/famepy-<version>-py3-none-any.whl --source-sha <revision> \
+  --abi-attestation <sha256-of-the-checklist-review-record> \
+  --julia /path/to/julia --julia-project /path/to/project-with-FAME.jl
+```
 
-- Calling convention and status convention: `cfm*` returns void and takes a
-  leading status pointer; `fame_*` returns status. Confirm against local headers.
-- Integer and Boolean width, 64-bit date/index width, signedness, and native
-  range struct size, alignment and field offsets on each platform.
-- `fame_year_period_to_index` output: the reference declares it inconsistently;
-  the candidate uses the 64-bit declaration from its bridge. This is unresolved.
-- Input strings versus writable output buffers, arrays of string pointers,
-  lengths, terminators and allocation ownership.
-- Missing globals (including whether each string global is a pointer or array),
-  error codes such as truncation, and version-specific exported symbols.
-- The truncation status value and whether extended error status 513 still
-  requires `cfmferr`; that function's output-buffer size and accepted encoding.
-- Object-name and path/command encodings, maximum wildcard name byte length,
-  Linux transitive-library search requirements and additional Windows DLL paths.
-- Whether CHLI initialization requires `FAME` even with an explicit library path.
+Options: `--groups lifecycle,database,...` selects groups (`--list` prints
+them), `--timeout` bounds each operation (children get four times it, and a
+timed-out child is terminated together with its descendants), `--library`
+and `--root` override discovery, `--julia`/`--julia-project` enable the
+differential checks. Without `--native` every group is reported as blocked; a
+missing or unloadable library blocks them too. Native groups never silently
+pass without a library.
 
-Record permitted technical conclusions, not copies of headers or help text.
-Symbol presence alone cannot establish any of the above. The shim verifies the
-Python calling mechanism against its own declarations, not a vendor ABI.
-The synthetic shim exports a double, a string pointer and a string array; tests
-verify only address discovery for all three, never reinterpret a string array
-as a pointer. Seeing a symbol does not establish its type or calling convention.
+The scratch directory must be new or empty. The runner reserves a fresh
+`run-<id>` directory inside it and every group works in its own subdirectory
+of that run; nothing pre-existing is written, replaced or removed, and a
+nonempty directory, a file or a symbolic link makes the scratch unusable and
+launches no child. A second campaign needs a new (or emptied) scratch.
 
-## Subsequent integration gate
+Execution order and gates:
 
-Use disposable synthetic databases, subprocess timeouts, deterministic values,
-and the exact built artifact. Record OS/architecture, Python/dependency/FAME
-versions, source revision, artifact SHA256, commands, exit codes and skips.
-Test close/reopen and cross-process persistence, failures, missing values, all
-supported frequency anchors, and Julia/Python interchange in both directions.
-Mark unavailable comparisons outstanding. No such database tests ship yet.
+1. `preflight` (parent, read-only apart from the reserved run directory):
+   environment, dependency versions, package identity (source hash, whether
+   the import came from site-packages or the working directory, the wheel
+   hash and whether the wheel's shipped sources match the imported package),
+   the ABI table identity, the operator's attestation, scratch reservation,
+   discovery and symbol probe including the presence-only row.
+2. `lifecycle` (child): initialize, version, sentinel facts, finalize, reset.
+   Failure blocks the remaining groups.
+3. `database`, `raw_matrix`, `discovery`, `commands`, `bridge`: each in its
+   own child with its own runtime and scratch subdirectory. Calendar indices
+   used by the groups come from the library's own year/period conversion.
+   Persistence is verified by a further child that reopens the database
+   read-only and compares class, type, frequency, range and exact value bits
+   against a manifest. The Julia differential runs inside `bridge` when
+   configured and is otherwise reported as unsupported.
 
-The installation has no compiler or vendor-help build step. If offline installs
-are needed, collect compatible dependency wheels in an approved environment and
-install from that wheelhouse; do not copy a virtual environment between OSes.
+Compare every row of the [per-function checklist](abi-checklist.md) with the
+installed header before the first run, record the conclusions per row in a
+private record and pass that record's SHA-256 as `--abi-attestation`; the
+report carries both the attestation and the identity of the declaration table
+it applies to. Symbol presence does not validate a signature.
+
+For actual native groups, preflight requires an installed package, a source
+revision, a valid wheel whose shipped sources match the installed package, and
+an ABI-review attestation digest. Missing or mismatched provenance blocks the
+groups. Injected offline backends are exempt from this native-only gate.
+
+## How a group passes
+
+The parent trusts nothing a child prints. A group passes only when its child
+exited cleanly, every reported case is well formed, every required case for
+that group is present with status `pass`, and no case failed or was blocked.
+Duplicate case identifiers, required cases marked only as observations,
+missing required cases, an empty case list, an unknown status, a malformed
+value, an exception outside the recorder or a timeout make the group fail; a
+required case reported blocked makes the group blocked. The campaign result
+is `PASS` only when every selected group passed. Predicates are asserted
+explicitly (a callable that merely returns is not a passing assertion), scalar
+and array values are compared by dtype and bit pattern, and observations that
+are not assertions are marked `observation`.
+
+The self-test in the package's own test suite drives the runner with
+intentionally faulty backends (wrong version, NaN payloads lost, posts
+discarded, private markers in native output, a hanging initialization) and
+with adversarial child payloads; each must yield `FAIL` or `BLOCKED`, and no
+synthetic private marker may reach the final report.
+
+## Report contents
+
+The report holds versions, platform, package identity, symbol presence,
+per-group status with pass/fail/blocked/unsupported counts, exit codes and
+timeouts, and per-case records limited to identifiers, statuses, error class
+names, numeric CHLI statuses, OS error numbers, and synthetic expected/actual
+values. Every case is validated against a field and value schema in the
+parent: strings are short and free of path separators, floats that are not
+finite appear only as bit patterns, and anything else is replaced by a
+`malformed case record` failure. Command output never enters the report;
+command cases record predicates only. Review the report before transferring
+it anywhere.
+
+Retain with the report: the exact source revision and any working-tree diff,
+the wheel hash, library version and OS/architecture, dependency versions and
+the command used. On a retry after a fix, record the changed identity.
+
+## Julia differential
+
+When `--julia` is given, the bridge group writes a script that reads the
+Python-written database with FAME.jl and reports values as IEEE bit patterns,
+then writes a database for Python to read back. The FAME.jl tree identity is
+compared with the pinned reference; a different tree qualifies the comparison
+(the case is reported `unsupported`, the value comparisons carry a note) so
+that a mismatch is visible and never a silent pass.
+
+## Offline checks
+
+```sh
+uv run ruff check . && uv run ruff format --check . && uv run mypy
+uv run pytest -q
+uv run python scripts/build_test_shim.py    # then set FAMEPY_TEST_SHIM and rerun pytest
+uv run python scripts/verify_artifacts.py   # installed wheel and sdist-rebuilt wheel
+```
+
+The shim implements the candidate declarations over an in-memory toy database
+with fault injection, so pointer, buffer, lifetime, wildcard, command and
+extended-error mechanics are exercised end to end without vendor code. Its
+`cfmlerr` signature is the shim's own choice for testing the retrieval
+mechanics and is not a vendor fact.

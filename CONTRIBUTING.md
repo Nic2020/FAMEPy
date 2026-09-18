@@ -25,6 +25,10 @@ uv run pre-commit run --all-files
 uv build
 ```
 
+Unit tests use the in-memory fake backend in `tests/fake_native.py`; it models
+the package's own contracts and is not FAME behavior evidence. The validation
+runner's self-test drives that fake through real subprocesses.
+
 The independent C shim needs a compiler (MSVC on Windows, GCC/Clang on Linux).
 Run from a compiler-enabled terminal:
 

@@ -9,7 +9,7 @@ import subprocess
 import sys
 from typing import Any
 
-from ._abi import GLOBALS, SIGNATURES, layout
+from ._abi import GLOBALS, PRESENCE_ONLY, SIGNATURES, layout
 from ._discovery import discover
 from ._errors import LibraryNotFoundError, UnsupportedPlatformError, error_number
 from ._probe import BOOTSTRAP, failure_kind, load_error_class
@@ -18,6 +18,7 @@ from ._probe import BOOTSTRAP, failure_kind, load_error_class
 def diagnose(
     library: str | os.PathLike[str] | None = None,
     *,
+    root: str | os.PathLike[str] | None = None,
     probe: bool = False,
     timeout: float = 15.0,
 ) -> dict[str, Any]:
@@ -26,6 +27,9 @@ def diagnose(
     The probe runs in a child process, resolves symbols and never calls CHLI.
     Finding symbols does not verify signatures, runtime version or usability.
     Child stdout/stderr (including vendor loader output) is never forwarded.
+    The trusted root (from ``root`` or discovery through ``FAME``) is carried
+    to the child so that it registers the same dependency directories as a
+    Session would.
     """
     if not 0 < timeout <= 300:
         raise ValueError("timeout must be greater than zero and at most 300 seconds.")
@@ -36,7 +40,7 @@ def diagnose(
         except importlib.metadata.PackageNotFoundError:
             dependencies[name] = None
     report: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "platform": sys.platform,
         "architecture": platform.machine(),
         "python": platform.python_version(),
@@ -46,20 +50,29 @@ def diagnose(
         "native_calls_executed": False,
     }
     try:
-        candidate = discover(library)
+        candidate = discover(library, root=root)
     except UnsupportedPlatformError:
         report["status"] = "unsupported_platform"
         return report
     except LibraryNotFoundError:
         report["status"] = "library_unavailable"
         return report
-    report.update(status="library_found", source=candidate.source)
+    report.update(
+        status="library_found",
+        source=candidate.source,
+        trusted_root_known=candidate.root is not None,
+    )
     if not probe:
         return report
     try:
         result = subprocess.run(
             [sys.executable, "-c", BOOTSTRAP],
-            input=json.dumps({"library": str(candidate.path)}),
+            input=json.dumps(
+                {
+                    "library": str(candidate.path),
+                    "root": None if candidate.root is None else str(candidate.root),
+                }
+            ),
             capture_output=True,
             timeout=timeout,
             check=False,
@@ -97,7 +110,12 @@ def diagnose(
             raise ValueError
         functions = {name: child["functions"][name] for name in SIGNATURES}
         globals_found = {name: child["globals"][name] for name in GLOBALS}
-        if any(type(value) is not bool for value in [*functions.values(), *globals_found.values()]):
+        presence = child.get("presence_only", {})
+        if not isinstance(presence, dict):
+            raise ValueError
+        presence_only = {name: presence.get(name, False) for name in PRESENCE_ONLY}
+        values = [*functions.values(), *globals_found.values(), *presence_only.values()]
+        if any(type(value) is not bool for value in values):
             raise ValueError
     except (ValueError, KeyError, TypeError):
         report["status"] = "probe_invalid_output"
@@ -108,5 +126,6 @@ def diagnose(
         else "symbols_missing",
         functions=functions,
         globals=globals_found,
+        presence_only=presence_only,
     )
     return report

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "FAMEPy"
-version = "0.0.1.dev0"
+version = "0.0.2.dev0"
 description = "Python bindings and time-series integration for the FAME CHLI library"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -44,11 +44,12 @@ filterwarnings = ["error::UserWarning", "error::RuntimeWarning"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+extend-exclude = ["build"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+# No python_version pin: each CI interpreter checks against its own NumPy stubs.
 strict = true
 files = ["src/famepy"]
