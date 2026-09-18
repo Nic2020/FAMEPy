@@ -81,6 +81,14 @@ no vendor declaration, so `extended_error_text()` raises
 ## Text
 
 No vendor encoding has been established. The native layer exchanges bytes.
+Text arguments that the library documents as both input and output (the
+database name of the local open, option names and values, object names of
+the older calling convention, namelist text) may be trimmed or upper-cased
+in place by the library, so the binding never hands them the caller's
+immutable bytes: each such argument is an owned NUL-terminated copy that
+lives for the call and is discarded afterwards. The caller's bytes, and any
+dictionary keyed by them, are never modified. Input-only text (commands,
+the newer functions' `const` names) is passed as given.
 `str` input must be ASCII and is rejected otherwise; `bytes` pass through
 without NUL bytes. Returned names are bytes with an ASCII `name_text` view
 that raises on non-ASCII content. This is an initial validation boundary.
@@ -92,13 +100,16 @@ or bounded hex); bytes that differ from a fixture are reported by length.
 
 ## Databases
 
-`open_database(name, mode="readonly")` accepts the seven modes as integers,
-names or `AccessMode` members. The package does not establish which modes an
-installation accepts for a given database: the first campaigns opened
-read-only, update, shared, create and overwrite successfully and received a
-status for `write` and `direct_write` on an existing local database, so those
-two are passed through unchanged and their prerequisites are recorded by the
-campaign rather than assumed. Closing never posts (the package issues no post
+`open_database(name, mode="readonly")` accepts the seven reference modes as
+integers, names or `AccessMode` members, and opens the five local ones:
+read-only, create, overwrite, update and shared. `write` and `direct_write`
+are modes of a database opened on a named server connection through a
+different open function (with write-server prerequisites of its own) that
+neither this package nor the reference binds; the local open rejects them
+with the bad-mode status, which is what every campaign observed. They are
+therefore refused with `UnsupportedOperationError` before any native call,
+never remapped to another mode. The constants remain for parity with the
+reference table. Closing never posts (the package issues no post
 on close; what the library does with unposted updates on close is recorded
 by the campaign as an observation); `post()` is explicit.
 Closing twice is a no-op. If the native close fails, the handle stays open and
@@ -115,13 +126,25 @@ string.
 
 `RawScalar` and `RawSeries` preserve native type, frequency, range and the
 NC/NA/ND encodings *inside* a series. What the library persists for missing
-observations at the start or end of a written range, or for a range made
-only of ND, is not established: the first campaigns observed numeric,
-Boolean and date series that ended in ND reading back one observation
-shorter, while a precision series with a normal value after ND kept its
-range. The package adds no padding and trims nothing; a read returns the
-range the library reports, and the campaign records endpoint outcomes as
-observations while asserting that normal values keep their positions.
+observations at the start or end of a written range is the library's
+rule, not the package's: the package adds no padding and trims nothing, a
+read returns the range the library reports, and the campaign asserts that
+whatever was retained equals what was written there while recording the
+retained range. On the two inspected installations every leading and
+trailing ND was dropped, an all-ND range read back empty, and leading and
+trailing NC and NA were kept; that is measured behavior of those
+installations, not a promise for every version.
+
+A namelist value is the list text the library returns (members within
+braces, separated by commas). The library documents that layout only to
+that extent and may return the same list spelled differently from what was
+written; `RawScalar.value` keeps the returned bytes untouched, and
+`namelist_members(value)` parses them into the ordered members under a
+strict grammar (optional blanks around members and inside an empty list;
+no empty members, no blanks inside a member, nothing outside the braces),
+raising `DataValidationError` for anything else. Members are returned as
+spelled, without case change or de-duplication. Plain string values are
+compared byte for byte; only namelists have this structural reading.
 Series values are exact-dtype one-dimensional arrays
 (float64, float32, int32, int64) or lists of bytes; a zero-length series is
 truly empty (NC endpoints). Scalar reads return exact-width NumPy scalars
@@ -159,16 +182,23 @@ raised. The default `observed` attribute is `summed` for floating data and
 ## Listing
 
 `list_objects` sets the ITEM options it needs inside its locked operation and
-then *normalizes* the four options it uses (`ITEM CLASS`, `ITEM TYPE`,
-`ITEM FREQUENCY`, `ITEM ALIAS`) to ON. The `frequencies` filter accepts exact
-frequency names or codes from the frequency table (a family word such as
-`quarterly` is refused with `ValueError`) and is enforced on the metadata of
-the listed objects: an object is returned only when its frequency code is one
-of those requested, so scalars (undefined frequency) appear only when
-`undefined` is requested. The native `ITEM FREQUENCY <name>` selection is
-still issued and any option error surfaces, but the first campaigns observed
-no effect from it on either host, so the result never depends on it. It does
-not restore a prior state:
+then *normalizes* the five options it uses (`ITEM CLASS`, `ITEM TYPE`,
+`ITEM FREQUENCY`, `ITEM INDEX`, `ITEM ALIAS`) to ON. The `frequencies`
+filter accepts exact frequency names or codes from the frequency table (a
+family word such as `quarterly` is refused with `ValueError`) and is
+enforced on the metadata of the listed objects: an object is returned only
+when its frequency code is one of those requested, so scalars (undefined
+frequency) appear only when `undefined` is requested. The library's own
+selectors are coarser than the package filter: `ITEM FREQUENCY <family>`
+words (`MONTHLY`, `QUARTERLY`, `WEEKLY`, ...) select date-indexed series by
+family, and `ITEM INDEX CASE` / `ITEM INDEX DATE` select series by index
+kind; there is no per-anchor word and no frequency word for case series.
+The listing narrows the native selection with those documented words only
+when that cannot exclude a requested object (families when every requested
+frequency is date-indexed; the case index when only `case` is requested)
+and leaves the selection broad otherwise, so the result never depends on
+the narrowing; any option error surfaces. It does not restore a prior
+state:
 there is no declared call to read the options back, so a selection made by an
 earlier command is not preserved across a listing. Commands that depend on
 those options must set them again afterwards. Cleanup frees the cursor and

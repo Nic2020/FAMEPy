@@ -9,16 +9,22 @@
  *   904 read-only database   905 object/database exists 906 missing database
  *   907 type mismatch        908 bad range             909 bad wildcard
  *   910 bad mode             911 name too long
- * Reference-derived statuses: 0 success, 3 already finished, 13 no object, 18 truncated, 67 bad
- * option, 513 command error (extended text available).
+ * Reference-derived statuses: 0 success, 3 already finished, 5 bad mode, 13 no object,
+ * 18 truncated, 67 bad option, 513 command error (extended text available).
  *
  * Behaviors observed on both protected hosts and modeled on purpose: the string
- * missing sentinels are two bytes that are not ASCII text; an ITEM FREQUENCY
- * selection is accepted but does not narrow the wildcard; "display" output goes
- * to the C-level stdout while no redirection is active; the redirection creates
- * its output file. Endpoint handling of missing observations and the write /
- * direct-write prerequisites are not established, so the shim stores what it is
- * given and accepts every mode on an existing store.
+ * missing sentinels are two bytes that are not ASCII text; the local open rejects
+ * modes 6 and 7 with status 5 and creates nothing; an ITEM FREQUENCY word that is
+ * not a documented family is a bad option; "display" output goes to the C-level
+ * stdout while no redirection is active; the redirection creates its output file.
+ * Documented but not natively measured, modeled as documented: ITEM FREQUENCY
+ * families narrow date-indexed series, ITEM INDEX CASE/DATE narrows series by
+ * index kind, scalars are untouched by either; and every text argument the older
+ * calling convention documents as in/output (database name, option words, object
+ * names, namelist text) is really rewritten in place here (trimmed, upper-cased),
+ * so a caller that hands over a buffer it does not own would see it change.
+ * Endpoint handling of missing observations is not established, so the shim
+ * stores what it is given.
  */
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdint.h>
@@ -45,6 +51,7 @@
 #define S_BAD_MODE 910
 #define S_NAME_TOO_LONG 911
 #define HFIN 3
+#define HBMODE 5
 #define HNOOBJ 13
 #define HTRUNC 18
 #define HBOPT 67
@@ -123,9 +130,16 @@ static Cursor cursors[MAX_CURSORS];
 static Object work_objects[MAX_OBJ];
 static FILE *output = NULL;
 static char error_text[256] = "";
-static int option_all[4] = {1, 1, 1, 1}; /* CLASS, TYPE, FREQUENCY, ALIAS */
-static char option_values[4][8][32];
-static int option_counts[4];
+static int option_all[5] = {1, 1, 1, 1, 1}; /* CLASS, TYPE, FREQUENCY, ALIAS, INDEX */
+static char option_values[5][32][32];
+static int option_counts[5];
+static const char *const CLASS_WORDS[] = {"FORMULA", "GLFORMULA", "GLNAME", "SCALAR", "SERIES", NULL};
+static const char *const TYPE_WORDS[] = {"BOOLEAN", "DATE", "NAMELIST", "NUMERIC", "PRECISION", "STRING", NULL};
+static const char *const FREQUENCY_WORDS[] = {
+    "ANNUAL", "BIMONTHLY", "BIWEEKLY", "BUSINESS", "DAILY", "HOURLY", "MILLISECONDLY",
+    "MINUTELY", "MONTHLY", "PPY", "QUARTERLY", "SECONDLY", "SEMIANNUAL", "TENDAY",
+    "TWICEMONTHLY", "USERDEFINED", "WEEKLY", "YPP", NULL};
+static const char *const INDEX_WORDS[] = {"CASE", "DATE", NULL};
 
 static void init_globals(void) {
     uint64_t q;
@@ -178,7 +192,7 @@ API void shim_reset(void) {
     memset(cursors, 0, sizeof cursors);
     memset(work_objects, 0, sizeof work_objects);
     error_text[0] = '\0';
-    option_all[0] = option_all[1] = option_all[2] = option_all[3] = 1;
+    option_all[0] = option_all[1] = option_all[2] = option_all[3] = option_all[4] = 1;
     memset(option_counts, 0, sizeof option_counts);
 }
 
@@ -186,6 +200,20 @@ static void upper_copy(char *dst, const char *src, size_t cap) {
     size_t n = 0;
     while (src[n] && n + 1 < cap) { dst[n] = (char)toupper((unsigned char)src[n]); ++n; }
     dst[n] = '\0';
+}
+
+/* In-place rewrite of a documented in/output text argument: leading and
+ * trailing blanks removed and, when asked, letters upper-cased. Writes never
+ * extend past the original terminator. */
+static void rewrite_in_place(char *text, int upper) {
+    size_t start = 0, end = strlen(text), n;
+    while (start < end && text[start] == ' ') ++start;
+    while (end > start && text[end - 1] == ' ') --end;
+    for (n = 0; n < end - start; ++n) {
+        char c = text[start + n];
+        text[n] = upper ? (char)toupper((unsigned char)c) : c;
+    }
+    text[end - start] = '\0';
 }
 
 static Handle *handle_of(int32_t key) {
@@ -312,23 +340,35 @@ static int option_index(const char *name) {
     if (strcmp(name, "TYPE") == 0) return 1;
     if (strcmp(name, "FREQUENCY") == 0) return 2;
     if (strcmp(name, "ALIAS") == 0) return 3;
+    if (strcmp(name, "INDEX") == 0) return 4;
     return -1;
 }
 
-API void cfmsopt(int32_t *status, const char *name, const char *value) {
-    char option[64], label[32];
+static int documented_word(int idx, const char *label) {
+    const char *const *words = idx == 0 ? CLASS_WORDS : idx == 1 ? TYPE_WORDS
+                             : idx == 2 ? FREQUENCY_WORDS : idx == 4 ? INDEX_WORDS : NULL;
+    if (!words) return 0;
+    for (; *words; ++words) if (strcmp(*words, label) == 0) return 1;
+    return 0;
+}
+
+API void cfmsopt(int32_t *status, char *name, char *value) {
+    char option[64], label[32], extra[2];
     int on, idx, fields;
     CFM_ENTER(status);
+    rewrite_in_place(name, 1);
+    rewrite_in_place(value, 1);
     if (strcmp(value, "ON") == 0) on = 1;
     else if (strcmp(value, "OFF") == 0) on = 0;
     else { *status = HBOPT; return; }
     label[0] = '\0';
-    fields = sscanf(name, "ITEM %63s %31s", option, label);
-    if (fields < 1 || (idx = option_index(option)) < 0) { *status = HBOPT; return; }
+    fields = sscanf(name, "ITEM %63s %31s %1s", option, label, extra);
+    if (fields < 1 || fields > 2 || (idx = option_index(option)) < 0) { *status = HBOPT; return; }
+    if (fields == 2 && !documented_word(idx, label)) { *status = HBOPT; return; }
     if (fields == 1) {
         option_all[idx] = on;
         option_counts[idx] = 0;
-    } else if (on && option_counts[idx] < 8) {
+    } else if (on && option_counts[idx] < 32) {
         strncpy(option_values[idx][option_counts[idx]], label, 31);
         option_values[idx][option_counts[idx]][31] = '\0';
         ++option_counts[idx];
@@ -342,6 +382,38 @@ static int option_allows(int idx, const char *label) {
     for (k = 0; k < option_counts[idx]; ++k)
         if (strcmp(option_values[idx][k], label) == 0) return 1;
     return 0;
+}
+
+/* The documented family of a date-indexed frequency code; NULL for case (232)
+ * and undefined (0), which have no frequency family. */
+static const char *frequency_family(int32_t freq) {
+    if (freq == 8) return "DAILY";
+    if (freq == 9) return "BUSINESS";
+    if (freq >= 16 && freq <= 22) return "WEEKLY";
+    if (freq == 32) return "TENDAY";
+    if (freq >= 64 && freq <= 77) return "BIWEEKLY";
+    if (freq == 128) return "TWICEMONTHLY";
+    if (freq == 129) return "MONTHLY";
+    if (freq == 144 || freq == 145) return "BIMONTHLY";
+    if (freq >= 160 && freq <= 162) return "QUARTERLY";
+    if (freq >= 192 && freq <= 203) return "ANNUAL";
+    if (freq >= 204 && freq <= 209) return "SEMIANNUAL";
+    if (freq == 224) return "YPP";
+    if (freq == 225) return "PPY";
+    if (freq == 226) return "SECONDLY";
+    if (freq == 227) return "MINUTELY";
+    if (freq == 228) return "HOURLY";
+    if (freq == 229) return "MILLISECONDLY";
+    if (freq == 233) return "USERDEFINED";
+    return NULL;
+}
+
+static int series_selected(const Object *o) {
+    const char *family;
+    if (o->cls != 1) return 1; /* frequency and index selectors are about series */
+    if (o->freq == 232) return option_allows(4, "CASE");
+    family = frequency_family(o->freq);
+    return option_allows(4, "DATE") && (family == NULL || option_allows(2, family));
 }
 
 static const char *type_label(int32_t type) {
@@ -378,12 +450,16 @@ API void cfmopwk(int32_t *status, int32_t *key) {
     *status = S_BAD_KEY;
 }
 
-API void cfmopdb(int32_t *status, int32_t *key, const char *name, int32_t mode) {
+API void cfmopdb(int32_t *status, int32_t *key, char *name, int32_t mode) {
     Store *store;
     int k;
     CFM_ENTER(status);
     if (!initialized) { *status = S_NOT_INITIALIZED; return; }
     if (mode < 1 || mode > 7) { *status = S_BAD_MODE; return; }
+    /* Modes 6 and 7 belong to the open on a server connection: the local open
+     * rejects them with the bad-mode status and touches no file. */
+    if (mode > 5) { *status = HBMODE; return; }
+    rewrite_in_place(name, 0);
     if (strlen(name) >= 512) { *status = HBOPT; return; }
     store = find_store(name);
     if (mode == 2 && store) { *status = S_EXISTS; return; }
@@ -435,11 +511,12 @@ API void cfmcldb(int32_t *status, int32_t key) {
 
 /* ---- objects ----------------------------------------------------------- */
 
-API void cfmnwob(int32_t *status, int32_t key, const char *name, int32_t cls, int32_t freq,
+API void cfmnwob(int32_t *status, int32_t key, char *name, int32_t cls, int32_t freq,
                  int32_t type, int32_t basis, int32_t observed) {
     Handle *h;
     int k;
     CFM_ENTER(status);
+    rewrite_in_place(name, 1);
     if (!(h = handle_of(key))) { *status = S_BAD_KEY; return; }
     if (h->mode == 1) { *status = S_READONLY; return; }
     if (strlen(name) > 242) { *status = S_NAME_TOO_LONG; return; }
@@ -461,10 +538,11 @@ API void cfmnwob(int32_t *status, int32_t key, const char *name, int32_t cls, in
     *status = S_BAD_KEY;
 }
 
-API void cfmdlob(int32_t *status, int32_t key, const char *name) {
+API void cfmdlob(int32_t *status, int32_t key, char *name) {
     Handle *h;
     Object *o;
     CFM_ENTER(status);
+    rewrite_in_place(name, 1);
     if (!(h = handle_of(key))) { *status = S_BAD_KEY; return; }
     if (h->mode == 1) { *status = S_READONLY; return; }
     if (!(o = find_object(h, name))) { *status = HNOOBJ; return; }
@@ -612,9 +690,10 @@ API int32_t fame_write_strings(int32_t key, const char *name, const TestRange *r
 
 /* ---- namelists --------------------------------------------------------- */
 
-API void cfmnlen(int32_t *status, int32_t key, const char *name, int32_t which, int32_t *length) {
+API void cfmnlen(int32_t *status, int32_t key, char *name, int32_t which, int32_t *length) {
     Handle *h; Object *o;
     CFM_ENTER(status);
+    rewrite_in_place(name, 1);
     if (which != -1) { *status = HBOPT; return; }
     if (!(h = handle_of(key))) { *status = S_BAD_KEY; return; }
     if (!(o = find_object(h, name))) { *status = HNOOBJ; return; }
@@ -623,10 +702,11 @@ API void cfmnlen(int32_t *status, int32_t key, const char *name, int32_t which, 
     *status = 0;
 }
 
-API void cfmgtnl(int32_t *status, int32_t key, const char *name, int32_t which, char *buffer,
+API void cfmgtnl(int32_t *status, int32_t key, char *name, int32_t which, char *buffer,
                  int32_t capacity, int32_t *length) {
     Handle *h; Object *o; size_t full, cap, used;
     CFM_ENTER(status);
+    rewrite_in_place(name, 1);
     if (which != -1) { *status = HBOPT; return; }
     if (!(h = handle_of(key))) { *status = S_BAD_KEY; return; }
     if (!(o = find_object(h, name))) { *status = HNOOBJ; return; }
@@ -640,9 +720,11 @@ API void cfmgtnl(int32_t *status, int32_t key, const char *name, int32_t which, 
     *status = full > cap ? HTRUNC : 0;
 }
 
-API void cfmwtnl(int32_t *status, int32_t key, const char *name, int32_t which, const char *text) {
+API void cfmwtnl(int32_t *status, int32_t key, char *name, int32_t which, char *text) {
     Handle *h; Object *o;
     CFM_ENTER(status);
+    rewrite_in_place(name, 1);
+    rewrite_in_place(text, 1);
     if (which != -1) { *status = HBOPT; return; }
     if (!(h = handle_of(key))) { *status = S_BAD_KEY; return; }
     if (h->mode == 1) { *status = S_READONLY; return; }
@@ -683,10 +765,10 @@ API int32_t fame_init_wildcard(int32_t key, int32_t *cursor_key, const char *pat
             cursors[c].used = 1; cursors[c].position = 0; cursors[c].count = 0; cursors[c].db = key;
             for (k = 0; k < MAX_OBJ; ++k) {
                 Object *o = &h->objects[k];
-                /* ITEM FREQUENCY selections are recorded but not applied (observed). */
                 if (o->used && match(pattern, o->name)
                     && option_allows(0, o->cls == 1 ? "SERIES" : "SCALAR")
-                    && option_allows(1, type_label(o->type)))
+                    && option_allows(1, type_label(o->type))
+                    && series_selected(o))
                     cursors[c].object_index[cursors[c].count++] = k;
             }
             *cursor_key = c;

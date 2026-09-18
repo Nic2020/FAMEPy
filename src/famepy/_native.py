@@ -4,8 +4,12 @@
 ``CtypesNative`` marshals Python values, NumPy buffers and byte strings to the
 candidate CHLI declarations. Every bulk buffer is validated (dtype, width,
 native byte order, contiguity, length) before a native call and is never
-converted or mutated on the caller's behalf. ``NativeInterface`` is the
-injectable boundary used by the fake backend in tests.
+converted or mutated on the caller's behalf. Text arguments the library
+documents as both input and output (names it trims and upper-cases, option
+words, namelist text) are passed as owned writable copies, so the caller's
+bytes, and any dictionary keyed by them, stay unchanged whatever the library
+writes back. ``NativeInterface`` is the injectable boundary used by the fake
+backend in tests.
 """
 
 from __future__ import annotations
@@ -230,6 +234,16 @@ def _name(name: Any) -> bytes:
     return name
 
 
+def _owned_text(value: Any) -> Any:
+    """An owned, writable, NUL-terminated copy for a documented in/output text argument.
+
+    The library may trim or upper-case such text in place. The copy is what
+    it writes to; the caller's immutable bytes are never handed over.
+    """
+    data = _name(value)
+    return ct.create_string_buffer(data, len(data) + 1)
+
+
 def read_extended_error(
     query_length: Callable[[], int],
     fetch: Callable[[Any], None],
@@ -321,7 +335,9 @@ class CtypesNative:
 
     def open_database(self, name: bytes, mode: int) -> int:
         key = ct.c_int32(-1)
-        self._binding.call("cfmopdb", ct.byref(key), _name(name), _int32(mode, "mode"))
+        text = _owned_text(name)
+        self._binding.call("cfmopdb", ct.byref(key), text, _int32(mode, "mode"))
+        del text
         return int(key.value)
 
     def close_database(self, key: int) -> None:
@@ -363,19 +379,23 @@ class CtypesNative:
         basis: int,
         observed: int,
     ) -> None:
+        text = _owned_text(name)
         self._binding.call(
             "cfmnwob",
             _int32(key, "database key"),
-            _name(name),
+            text,
             _int32(class_code, "class"),
             _int32(frequency, "frequency"),
             _int32(type_code, "type"),
             _int32(basis, "basis"),
             _int32(observed, "observed"),
         )
+        del text
 
     def delete_object(self, key: int, name: bytes) -> None:
-        self._binding.call("cfmdlob", _int32(key, "database key"), _name(name))
+        text = _owned_text(name)
+        self._binding.call("cfmdlob", _int32(key, "database key"), text)
+        del text
 
     # -- bulk numeric/date data -----------------------------------------
 
@@ -537,35 +557,46 @@ class CtypesNative:
 
     def get_namelist(self, key: int, name: bytes) -> bytes:
         length = ct.c_int32(-1)
+        # Each call gets its own copy: the first may have been rewritten.
         self._binding.call(
-            "cfmnlen", _int32(key, "database key"), _name(name), NAMELIST_ALL, ct.byref(length)
+            "cfmnlen",
+            _int32(key, "database key"),
+            _owned_text(name),
+            NAMELIST_ALL,
+            ct.byref(length),
         )
         size = int(length.value)
         if size < 0 or size > MAX_STRING_BYTES:
             raise DataValidationError("Reported namelist length is outside the accepted bound.")
         buffer = ct.create_string_buffer(size + 1)
         returned = ct.c_int32(-1)
+        text = _owned_text(name)
         self._binding.call(
             "cfmgtnl",
             _int32(key, "database key"),
-            _name(name),
+            text,
             NAMELIST_ALL,
             ct.cast(buffer, C),
             size,
             ct.byref(returned),
         )
+        del text
         used = min(max(int(returned.value), 0), size)
         return bytes(buffer.raw[:used])
 
     def write_namelist(self, key: int, name: bytes, value: bytes) -> None:
         if not isinstance(value, bytes) or b"\0" in value:
             raise DataValidationError("Namelist text must be NUL-free bytes.")
-        self._binding.call("cfmwtnl", _int32(key, "database key"), _name(name), NAMELIST_ALL, value)
+        text, payload = _owned_text(name), _owned_text(value)
+        self._binding.call("cfmwtnl", _int32(key, "database key"), text, NAMELIST_ALL, payload)
+        del text, payload
 
     # -- options, wildcards, commands ------------------------------------
 
     def set_option(self, name: bytes, value: bytes) -> None:
-        self._binding.call("cfmsopt", _name(name), _name(value))
+        option, setting = _owned_text(name), _owned_text(value)
+        self._binding.call("cfmsopt", option, setting)
+        del option, setting
 
     def init_wildcard(self, key: int, pattern: bytes) -> int:
         wildcard_key = ct.c_int32(-1)

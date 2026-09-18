@@ -113,16 +113,26 @@ range and equals, index by index, what was written there (an invented value,
 a changed missing code or a shifted range fails), that the normal value keeps
 its position, and that an explicit read of the stored range agrees. Their
 cross-process manifest is built from the written values over the retained
-indices, never from what was read back. Which endpoint rule the library
-applies remains an open vendor question; these checks establish
-preservation, not the rule. Within `database`, the
-`write` and `direct_write` modes use their own fixtures: an existing database
-(open, write, post, reopen and list; required) and a path that does not
-exist yet (recorded as an observation). Within `discovery`, the frequency
-filter is checked as exact sets over mixed frequencies and scalars, invalid
-input is refused, and the count the native wildcard yields under the
-`ITEM FREQUENCY` selection alone is recorded as an observation. Within
-`commands`, a failing case names the stage that returned the status.
+indices, never from what was read back. The endpoint rule is the library's
+and is recorded per installation; these checks establish preservation, not
+the rule. A namelist is asserted by its ordered members (a reordered,
+missing or malformed member fails, in the group and across processes) while
+its length and which documented layout the library used are recorded as
+observations; the returned bytes themselves never enter the report. Within
+`database`, the `write` and `direct_write` modes use their own fixtures: an
+existing database and a path that does not exist yet. The package must
+refuse both modes before any native call, the library's local open must
+return the bad-mode status for both (an unexpected success is closed again
+and fails the case), the existing database must be unchanged and the new
+path must stay absent; all of these are required. Within `discovery`, every
+listing call is its own case, so one failure cannot hide the later class,
+type, alias, name-length and truncation cases; the frequency filter is
+checked as exact sets over mixed frequencies and scalars, invalid input is
+refused, the options are shown normalized afterwards, and the counts the
+native wildcard yields under the documented family and index words alone
+are recorded as isolated observations (an option error there is recorded,
+never propagated). Within `commands`, a failing case names the stage that
+returned the status.
 
 Compare every row of the [per-function checklist](abi-checklist.md) with the
 installed header before the first run, record the conclusions per row in a
@@ -165,12 +175,15 @@ The self-test in the package's own test suite drives the runner with
 intentionally faulty backends (wrong version, NaN payloads lost, posts
 discarded, private markers in native output, a hanging initialization, one
 object that cannot be created, a classifier that fails inside one object,
-corrupted endpoint reads, refused write modes, refused redirections,
+corrupted endpoint reads, a local open that accepts the connection modes or
+leaves a file behind when refusing them, rejected family or index option
+words, reordered or dropped namelist members, refused redirections,
 failed restorations, a lost endpoint neighbour) and with adversarial child
 payloads and results; each must yield `FAIL` or `BLOCKED`, and no synthetic
 private marker may reach the final report. Backends that print forged
-results and diagnostics to the C-level streams, or that apply a different
-endpoint rule, must still pass with only their observations changed.
+results and diagnostics to the C-level streams, that apply a different
+endpoint rule, or that lay a namelist out differently, must still pass with
+only their observations changed.
 
 ## Report contents
 

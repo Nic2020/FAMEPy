@@ -32,10 +32,11 @@ import numpy as np
 
 import famepy
 from famepy import bridge
-from famepy._constants import FREQUENCY_MONTHLY, NAME_CAPACITY
-from famepy._data import classify_by_sentinel, sentinel_value
-from famepy._errors import FameError
+from famepy._constants import FREQUENCY_MONTHLY, NAME_CAPACITY, AccessMode
+from famepy._data import classify_by_sentinel, namelist_members, sentinel_value
+from famepy._errors import HBMODE, FameError
 from famepy._runtime import Session
+from famepy._text import to_native
 from famepy._wildcard import native_listing_count
 
 from ._process import launch_worker, reserve_result
@@ -197,12 +198,16 @@ def _manifest_value(kind: str, value: Any) -> Any:
     """Encode values losslessly: floats by bit pattern, strings as bytes in hex.
 
     String values are bytes, not text: the library's own string sentinels are
-    not ASCII, so a text decoding would fail or alter them.
+    not ASCII, so a text decoding would fail or alter them. A namelist is
+    described by its ordered members (each in hex), because the library
+    documents no fixed layout for the list text.
     """
     if kind in ("precision", "numeric"):
         return [np.array(v, dtype=_DTYPES[kind]).tobytes().hex() for v in value]
     if kind in ("boolean", "date"):
         return [int(v) for v in value]
+    if kind == "namelist":
+        return [[m.hex() for m in namelist_members(bytes(v))] for v in value]
     return [bytes(v).hex() for v in value]
 
 
@@ -216,6 +221,8 @@ def _decode_manifest(kind: str, value: list[Any]) -> Any:
         return np.array(value, dtype=np.int32)
     if kind == "date":
         return np.array(value, dtype=np.int64)
+    if kind == "namelist":
+        return [[bytes.fromhex(m) for m in members] for members in value]
     return [bytes.fromhex(v) for v in value]
 
 
@@ -268,11 +275,32 @@ def run_verify(session: Session, manifest: dict[str, Any], recorder: Recorder) -
             recorder.equal(f"meta:{name}", actual_meta, expected_meta)
             if isinstance(raw, famepy.RawSeries):
                 actual: Any = raw.values
-            elif kind in ("string", "namelist"):
+            elif kind == "namelist":
+                # Ordered members, not the list text: a reordered, missing or
+                # corrupted member fails; a different layout does not.
+                actual = [_members_or_none(raw.value)]
+            elif kind == "string":
                 actual = [raw.value]
             else:
                 actual = np.array([raw.value])
             recorder.equal(f"values:{name}", actual, expected)
+
+
+def _members_or_none(value: Any) -> list[bytes] | None:
+    """Namelist members for comparison; text outside the grammar compares as None."""
+    try:
+        return list(namelist_members(value))
+    except famepy.DataValidationError:
+        return None
+
+
+def _namelist_layout(value: bytes, members: tuple[bytes, ...]) -> str:
+    """Which documented spelling the library used: a synthetic label, never the bytes."""
+    if value == b"{" + b",".join(members) + b"}":
+        return "compact"
+    if value == b"{" + b", ".join(members) + b"}":
+        return "blank_after_comma"
+    return "other"
 
 
 def _block_missing(recorder: Recorder, case_ids: tuple[str, ...] | list[str], note: str) -> None:
@@ -414,13 +442,17 @@ DATABASE_REQUIRED = (
     "mode_update",
     "mode_shared",
     "mode_write_fixture",
-    "mode_write",
-    "mode_write_reopen",
-    "mode_write_persisted",
+    "mode_write_refused",
+    "mode_write_native_status",
+    "mode_write_fixture_unchanged",
+    "mode_write_new_path_status",
+    "mode_write_new_path_absent",
     "mode_direct_write_fixture",
-    "mode_direct_write",
-    "mode_direct_write_reopen",
-    "mode_direct_write_persisted",
+    "mode_direct_write_refused",
+    "mode_direct_write_native_status",
+    "mode_direct_write_fixture_unchanged",
+    "mode_direct_write_new_path_status",
+    "mode_direct_write_new_path_absent",
     "mode_overwrite",
     "mode_overwrite_empties",
     "work_database_flow",
@@ -431,15 +463,22 @@ DATABASE_REQUIRED = (
 )
 
 
-def _attempt(function: Callable[[], Any]) -> Any:
-    """Outcome of an exploratory step: ``opened``, a native status or an error class."""
-    try:
-        function()
-    except FameError as error:
-        return error.status
-    except Exception as error:  # noqa: BLE001 - observation only
-        return type(error).__name__
-    return "opened"
+def _native_open_status(session: Session, path: Path, mode: AccessMode) -> int:
+    """Status of the library's own local open for ``mode``; a success is closed again.
+
+    The public API refuses the connection modes before any native call, so
+    the documented rejection by the local open is checked at the native
+    layer: zero means the library opened the database (unexpected under the
+    documentation and closed immediately), otherwise the status is returned.
+    """
+    text = to_native(str(path), what="database name")
+    with session.operation("open database") as native:
+        try:
+            key = native.open_database(text, int(mode))
+        except FameError as error:
+            return error.status
+        native.close_database(key)
+    return 0
 
 
 def group_database(ctx: Context) -> None:
@@ -506,53 +545,51 @@ def group_database(ctx: Context) -> None:
                     raise AssertionError("mode mismatch")
 
         r.check(f"mode_{mode}", open_close)
-    # Write and direct-write get their own fixtures: an existing database
-    # (required: open, write, post, persist) and a path that does not exist
-    # yet (observation only; the prerequisites of these modes are not
-    # established, so neither outcome is assumed).
+    # Write and direct-write are modes of a database opened on a named server
+    # connection, an API this package does not bind. The package refuses them
+    # before any native call, and the library's own local open is documented
+    # to reject them with the bad-mode status: both are asserted, on an
+    # existing database (which must stay unchanged) and on a path that does
+    # not exist (which must stay absent).
     for mode in ("write", "direct_write"):
+        member = AccessMode[mode.upper()]
         existing = ctx.path(f"{mode}_existing.db")
+        new_path = ctx.path(f"{mode}_new.db")
 
         def make_fixture(existing: Path = existing) -> None:
             with famepy.open_database(existing, "create", session=session) as database:
                 famepy.write_object(database, "base", famepy.scalar("precision", 1.0))
                 database.post()
 
-        def open_write(existing: Path = existing, mode: str = mode) -> None:
-            with famepy.open_database(existing, mode, session=session) as database:
-                if database.mode.name.lower() != mode:
-                    raise AssertionError("mode mismatch")
-                famepy.write_object(database, "added", famepy.scalar("precision", 2.0))
-                database.post()
-
         def reopen(existing: Path = existing) -> list[str]:
             with famepy.open_database(existing, session=session) as database:
                 return sorted(info.name_text for info in famepy.list_objects(database))
 
+        def native_status(target: Path, member: AccessMode = member) -> Callable[[], int]:
+            return lambda: _native_open_status(session, target, member)
+
+        def refused(existing: Path = existing, mode: str = mode) -> famepy.Database:
+            return famepy.open_database(existing, mode, session=session)
+
+        def absent(new_path: Path = new_path) -> bool:
+            return new_path.exists()
+
         if r.ok(f"mode_{mode}_fixture", make_fixture):
-            r.check(f"mode_{mode}", open_write)
-            listed = r.check(f"mode_{mode}_reopen", reopen)
-            r.equal(f"mode_{mode}_persisted", listed, ["ADDED", "BASE"])
+            r.expect_error(f"mode_{mode}_refused", refused, (famepy.UnsupportedOperationError,))
+            r.expect(f"mode_{mode}_native_status", native_status(existing), HBMODE)
+            r.expect(f"mode_{mode}_fixture_unchanged", reopen, ["BASE"])
         else:
             _block_missing(
                 r,
-                (f"mode_{mode}", f"mode_{mode}_reopen", f"mode_{mode}_persisted"),
+                (
+                    f"mode_{mode}_refused",
+                    f"mode_{mode}_native_status",
+                    f"mode_{mode}_fixture_unchanged",
+                ),
                 "fixture database not created",
             )
-        new_path = ctx.path(f"{mode}_new.db")
-
-        def open_new(new_path: Path = new_path, mode: str = mode) -> None:
-            with famepy.open_database(new_path, mode, session=session) as database:
-                famepy.write_object(database, "n", famepy.scalar("precision", 3.0))
-                database.post()
-
-        outcome = _attempt(open_new)
-        r.fact(
-            f"mode_{mode}_new_path",
-            outcome,
-            note="observation; mode prerequisites not established",
-        )
-        r.fact(f"mode_{mode}_new_path_file_exists", new_path.is_file())
+        r.expect(f"mode_{mode}_new_path_status", native_status(new_path), HBMODE)
+        r.expect(f"mode_{mode}_new_path_absent", absent, False)
     overwrite = ctx.path("overwrite.db")
 
     def overwrite_flow() -> int:
@@ -865,7 +902,20 @@ def _read_scalar_case(
     if raw is None:
         _block_missing(r, (f"values:{name}", f"classifier_agreement:{name}"), "read failed")
         return
-    if kind in ("string", "namelist"):
+    if kind == "namelist":
+        # The library documents the list text as members within braces
+        # separated by commas and no fixed layout beyond that, so the
+        # ordered members are asserted; the layout and the length are
+        # recorded, never the returned bytes.
+        expected_members = namelist_members(value)
+        r.equal(f"values:{name}", _members_or_none(raw.value), list(expected_members))
+        r.fact(f"namelist_length:{name}", len(raw.value))
+        r.fact(
+            f"namelist_layout:{name}",
+            _namelist_layout(raw.value, expected_members),
+            note="observation; the list text layout is not a documented contract",
+        )
+    elif kind == "string":
         r.equal(f"values:{name}", raw.value, value)
     else:
         r.equal(f"values:{name}", np.array([raw.value]), np.array([value], _DTYPES[kind]))
@@ -1120,6 +1170,9 @@ DISCOVERY_REQUIRED = (
     "filter_frequency_excludes_scalars",
     "filter_frequency_family_refused",
     "filter_frequency_invalid_refused",
+    "filter_frequency_undefined",
+    "filter_frequency_undefined_with_monthly",
+    "options_normalized_after_listing",
     "alias_off_lists",
     "scalar_range_from_quick_info",
     "long_name_length",
@@ -1160,37 +1213,44 @@ def group_discovery(ctx: Context) -> None:
             _discovery_cases(r, database, all_names)
 
     r.check("listing", listing)
+    _block_missing(r, DISCOVERY_REQUIRED[:-1], _PREREQUISITE)
     r.check("finalize", session.finalize)
 
 
 def _discovery_cases(r: Recorder, database: famepy.Database, all_names: list[str]) -> None:
-    def names(**filters: Any) -> list[str]:
-        return sorted(i.name_text for i in famepy.list_objects(database, **filters))
+    """One recorded case per listing call: a failure never hides the next predicate."""
 
-    r.equal("list_all", names(), all_names)
-    r.equal("wildcard_question", names(pattern="sales?"), ["SALES_A", "SALES_B"])
-    r.equal("wildcard_caret", names(pattern="sales_^"), ["SALES_A", "SALES_B"])
-    r.equal("filter_class_series", names(classes="series"), ["CASE_S", "SALES_A", "SALES_B"])
-    r.equal("filter_type_numeric", names(types="numeric"), ["SALES_B"])
-    # Frequency filtering is a metadata contract: exact frequencies only.
-    r.equal("filter_frequency_monthly", names(frequencies="monthly"), ["SALES_A", "SALES_B"])
-    r.equal("filter_frequency_case", names(frequencies="case"), ["CASE_S"])
-    r.equal(
+    def names(**filters: Any) -> Callable[[], list[str]]:
+        return lambda: sorted(i.name_text for i in famepy.list_objects(database, **filters))
+
+    r.expect("list_all", names(), all_names)
+    r.expect("wildcard_question", names(pattern="sales?"), ["SALES_A", "SALES_B"])
+    r.expect("wildcard_caret", names(pattern="sales_^"), ["SALES_A", "SALES_B"])
+    r.expect("filter_class_series", names(classes="series"), ["CASE_S", "SALES_A", "SALES_B"])
+    r.expect("filter_type_numeric", names(types="numeric"), ["SALES_B"])
+    # Frequency filtering is a metadata contract: exact frequencies only. The
+    # native selection is narrowed with documented family/index words where
+    # that cannot exclude a requested object, and left broad otherwise.
+    r.expect("filter_frequency_monthly", names(frequencies="monthly"), ["SALES_A", "SALES_B"])
+    r.expect("filter_frequency_case", names(frequencies="case"), ["CASE_S"])
+    r.expect(
         "filter_frequency_mixed",
         names(frequencies=["monthly", "case"]),
         ["CASE_S", "SALES_A", "SALES_B"],
     )
-    r.equal("filter_frequency_code", names(frequencies=FREQUENCY_MONTHLY), ["SALES_A", "SALES_B"])
-    r.equal(
+    r.expect("filter_frequency_code", names(frequencies=FREQUENCY_MONTHLY), ["SALES_A", "SALES_B"])
+    r.expect(
         "filter_frequency_with_class",
         names(classes="series", frequencies="monthly"),
         ["SALES_A", "SALES_B"],
     )
-    monthly = famepy.list_objects(database, frequencies="monthly")
-    r.equal(
+    r.expect(
         "filter_frequency_excludes_scalars",
-        [info.is_series and info.frequency == FREQUENCY_MONTHLY for info in monthly],
-        [True] * len(monthly),
+        lambda: [
+            info.is_series and info.frequency == FREQUENCY_MONTHLY
+            for info in famepy.list_objects(database, frequencies="monthly")
+        ],
+        [True, True],
     )
     r.expect_error(
         "filter_frequency_family_refused",
@@ -1202,28 +1262,50 @@ def _discovery_cases(r: Recorder, database: famepy.Database, all_names: list[str
         lambda: famepy.list_objects(database, frequencies="monthly;drop"),
         (ValueError,),
     )
-    scalars = [info for info in famepy.list_objects(database) if info.is_scalar]
-    r.fact("scalar_frequency_codes", sorted({info.frequency for info in scalars}))
-    # What the library's own ITEM FREQUENCY selection does to the wildcard,
-    # without the package filter: an observation for the option semantics.
+    scalars = [name for name in all_names if name not in ("CASE_S", "SALES_A", "SALES_B")]
+    r.expect("filter_frequency_undefined", names(frequencies="undefined"), scalars)
+    r.expect(
+        "filter_frequency_undefined_with_monthly",
+        names(frequencies=["undefined", "monthly"]),
+        sorted([*scalars, "SALES_A", "SALES_B"]),
+    )
+    # After a narrowed listing every option is back to ON: a broad listing
+    # lists everything again.
+    r.expect("options_normalized_after_listing", names(), all_names)
     r.fact(
-        "native_frequency_option_count",
-        native_listing_count(
-            database, "?", [(b"ITEM FREQUENCY", b"OFF"), (b"ITEM FREQUENCY MONTHLY", b"ON")]
+        "scalar_frequency_codes",
+        _observe(
+            lambda: sorted({i.frequency for i in famepy.list_objects(database) if i.is_scalar})
         ),
-        note="native wildcard count under ITEM FREQUENCY MONTHLY only; no package filter",
     )
-    r.equal("alias_off_lists", len(famepy.list_objects(database, alias=False)) >= 6, True)
-    scalar_info = famepy.list_objects(database, "sale")[0]
-    info = famepy.quick_info(database, "sale")
-    r.equal(
-        "scalar_range_from_quick_info",
-        [scalar_info.first_index, scalar_info.last_index],
-        [info.first_index, info.last_index],
-    )
-    r.equal(
+    # What the library's own selectors do to the wildcard without the package
+    # filter: observations of the option semantics, isolated so that an
+    # option error here is recorded and cannot abort the cases that follow.
+    for label, options in (
+        ("monthly_family", [(b"ITEM FREQUENCY", b"OFF"), (b"ITEM FREQUENCY MONTHLY", b"ON")]),
+        ("case_index", [(b"ITEM INDEX", b"OFF"), (b"ITEM INDEX CASE", b"ON")]),
+        ("date_index", [(b"ITEM INDEX", b"OFF"), (b"ITEM INDEX DATE", b"ON")]),
+    ):
+
+        def count(options: list[tuple[bytes, bytes]] = options) -> int:
+            return native_listing_count(database, "?", options)
+
+        r.fact(
+            f"native_selector_count:{label}",
+            _observe(count),
+            note="native wildcard count under this selection alone; no package filter",
+        )
+    r.expect("alias_off_lists", lambda: len(famepy.list_objects(database, alias=False)) >= 6, True)
+
+    def scalar_range_agrees() -> bool:
+        listed = famepy.list_objects(database, "sale")[0]
+        info = famepy.quick_info(database, "sale")
+        return [listed.first_index, listed.last_index] == [info.first_index, info.last_index]
+
+    r.expect("scalar_range_from_quick_info", scalar_range_agrees, True)
+    r.expect(
         "long_name_length",
-        max(len(i.name) for i in famepy.list_objects(database)),
+        lambda: max(len(i.name) for i in famepy.list_objects(database)),
         NAME_CAPACITY,
     )
     r.expect_error(
@@ -1231,7 +1313,17 @@ def _discovery_cases(r: Recorder, database: famepy.Database, all_names: list[str
         lambda: famepy.list_objects(database, capacity=8),
         (famepy.NameTruncatedError,),
     )
-    r.equal("listing_after_truncation_still_works", len(famepy.list_objects(database)), 6)
+    r.expect("listing_after_truncation_still_works", lambda: len(famepy.list_objects(database)), 6)
+
+
+def _observe(function: Callable[[], Any]) -> Any:
+    """Value of an observation, or the native status / error class when it fails."""
+    try:
+        return function()
+    except FameError as error:
+        return {"status": error.status}
+    except Exception as error:  # noqa: BLE001 - observation only
+        return {"error": type(error).__name__}
 
 
 COMMANDS_REQUIRED = (

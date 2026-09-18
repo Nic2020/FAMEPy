@@ -74,16 +74,16 @@ def test_status_pointer_and_return(native, library):
     binding = native.binding
     key = ct.c_int32()
     with pytest.raises(FameError) as error:
-        binding.call("cfmopdb", ct.byref(key), b"synthetic", 1)
+        binding.call("cfmopdb", ct.byref(key), ct.create_string_buffer(b"synthetic"), 1)
     assert error.value.status == 901
     binding.call("cfmini")
     version = ct.c_float()
     binding.call("cfmver", ct.byref(version))
     assert version.value == 4.25
-    binding.call("cfmopdb", ct.byref(key), b"synthetic", 2)
+    binding.call("cfmopdb", ct.byref(key), ct.create_string_buffer(b"synthetic"), 2)
     assert key.value >= 0
     with pytest.raises(FameError) as error:
-        binding.call("cfmopdb", ct.byref(key), b"synthetic", 9)
+        binding.call("cfmopdb", ct.byref(key), ct.create_string_buffer(b"synthetic"), 9)
     assert error.value.status == 910
     assert binding.call_status("cfmfin") == 0
 
@@ -382,3 +382,84 @@ def test_native_lifecycle_runner_uses_unloaded_wrapper_and_fresh_child(tmp_path,
     cases = {case["id"]: case for case in report["cases"]}
     assert cases["new_wrapper_untouched"]["actual"] == ["created", False, False, 0]
     assert cases["fresh_process:finalized_state"]["status"] == "pass"
+
+
+def test_rewritten_text_arguments_never_touch_the_callers_bytes(session, library):
+    """The shim really trims and upper-cases in/output text; the caller sees nothing."""
+    name = b"kept"  # upper-cased in place by the shim; blanks are trimmed elsewhere
+    option, value = b" item class ", b" on "
+    namelist = b"{ a, b }"
+    keyed = {name: "name", option: "option", value: "value", namelist: "list"}
+    database = famepy.open_database(b" rewrite.db ", "create", session=session)
+    famepy.write_object(database, name, famepy.scalar("precision", 1.0))
+    famepy.write_object(database, b" nl ", famepy.scalar("namelist", namelist))
+    database.post()
+    with database.session.operation("options") as native:
+        native.set_option(option, value)
+    assert famepy.read_object(database, "kept").value == 1.0
+    stored = famepy.read_object(database, "nl").value
+    assert stored == b"{ A, B }"  # the shim stored its upper-cased rewrite
+    assert famepy.namelist_members(stored) == (b"A", b"B")
+    famepy.delete_object(database, name)
+    database.post()
+    database.close()
+    with famepy.open_database("rewrite.db", session=session) as reopened:
+        assert [i.name_text for i in famepy.list_objects(reopened)] == ["NL"]
+    assert name == b"kept" and option == b" item class " and value == b" on "
+    assert namelist == b"{ a, b }"
+    assert keyed[b"kept"] == "name" and keyed[b"{ a, b }"] == "list"
+    assert hash(name) == hash(b"kept") and len(keyed) == 4
+
+
+def test_shim_rejects_connection_modes_and_undocumented_option_words(session, native):
+    database = famepy.open_database("modes.db", "create", session=session)
+    database.post()
+    database.close()
+    for mode in (6, 7):
+        with pytest.raises(FameError) as error:
+            native.open_database(b"modes.db", mode)
+        assert error.value.status == 5
+        with pytest.raises(famepy.UnsupportedOperationError):
+            famepy.open_database("modes.db", mode, session=session)
+    with pytest.raises(FameError) as error:
+        native.open_database(b"absent.db", 6)
+    assert error.value.status == 5
+    for word in (b"ITEM FREQUENCY CASE", b"ITEM FREQUENCY QUARTERLY_DECEMBER", b"ITEM INDEX X"):
+        with pytest.raises(FameError) as error:
+            native.set_option(word, b"ON")
+        assert error.value.status == 67
+    native.set_option(b"ITEM FREQUENCY", b"ON")
+    native.set_option(b"ITEM INDEX", b"ON")
+
+
+def test_shim_applies_family_and_index_selectors_to_series_only(db):
+    famepy.write_object(db, "m", famepy.series("precision", "monthly", 0, np.zeros(1)))
+    famepy.write_object(db, "q", famepy.series("precision", "quarterly_december", 0, np.zeros(1)))
+    famepy.write_object(db, "c", famepy.series("string", "case", 1, [b"x"]))
+    famepy.write_object(db, "s", famepy.scalar("precision", 1.0))
+    names = lambda **f: sorted(i.name_text for i in famepy.list_objects(db, **f))  # noqa: E731
+    assert names(frequencies="monthly") == ["M"]
+    assert names(frequencies=["monthly", "quarterly_december"]) == ["M", "Q"]
+    assert names(frequencies="case") == ["C"]
+    assert names(frequencies=["case", "monthly"]) == ["C", "M"]
+    assert names(frequencies=["undefined", "monthly"]) == ["M", "S"]
+    assert names() == ["C", "M", "Q", "S"]
+    from famepy._wildcard import native_listing_count
+
+    monthly_only = [(b"ITEM FREQUENCY", b"OFF"), (b"ITEM FREQUENCY MONTHLY", b"ON")]
+    assert native_listing_count(db, "?", monthly_only) == 3  # M, the case series, the scalar
+    case_only = [(b"ITEM INDEX", b"OFF"), (b"ITEM INDEX CASE", b"ON")]
+    assert native_listing_count(db, "?", case_only) == 2  # C and the scalar
+    assert names() == ["C", "M", "Q", "S"]
+
+
+def test_shim_really_rewrites_in_out_text(library, native):
+    """Guards the ownership test above against a shim that stopped mutating."""
+    native.initialize()
+    status = ct.c_int32(-1)
+    option, value = ct.create_string_buffer(b" item class "), ct.create_string_buffer(b" on ")
+    library.cfmsopt.argtypes = [ct.POINTER(ct.c_int32), C, C]
+    library.cfmsopt(ct.byref(status), option, value)
+    assert status.value == 0
+    assert option.value == b"ITEM CLASS" and value.value == b"ON"
+    native.finalize()

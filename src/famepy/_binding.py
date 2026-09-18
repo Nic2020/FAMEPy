@@ -6,7 +6,7 @@ from __future__ import annotations
 import ctypes as ct
 from typing import Any
 
-from ._abi import INT32, PI, SIGNATURES
+from ._abi import INT32, PI, SIGNATURES, WRITABLE_TEXT
 from ._errors import SymbolNotFoundError, check_status
 
 
@@ -36,6 +36,12 @@ class Binding:
     def call_status(self, name: str, *args: Any) -> int:
         """Call and return the raw status without raising."""
         spec = SIGNATURES[name]
+        # POINTER(c_char) still accepts immutable bytes through ctypes coercion.
+        # Require the owned arrays supplied by the adapter for in/output text.
+        for position in WRITABLE_TEXT.get(name, ()):
+            value = args[position]
+            if not isinstance(value, ct.Array) or value._type_ is not ct.c_char:
+                raise TypeError("Writable native text requires an owned character array.")
         function = self._resolve(name)
         if spec.convention == "cfm":
             status = INT32(-1)

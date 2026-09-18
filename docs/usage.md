@@ -40,10 +40,13 @@ with famepy.open_database("synthetic.db") as db:
 work = famepy.work_database()  # the process work database, opened once
 ```
 
-Modes: integers 1-7, names (`readonly`, `create`, `overwrite`, `update`,
-`shared`, `write`, `direct_write`) or `famepy.AccessMode` members. Remote
-connection strings are passed through unchanged and never appear in `repr`
-or error messages.
+Modes: integers 1-5, names (`readonly`, `create`, `overwrite`, `update`,
+`shared`) or `famepy.AccessMode` members. `write` and `direct_write` (6 and
+7) exist for parity with the reference but belong to a database opened on a
+named server connection, which this release does not bind; they raise
+`UnsupportedOperationError` before any native call. Remote connection
+strings are passed through unchanged and never appear in `repr` or error
+messages.
 
 ## Raw objects
 
@@ -61,7 +64,9 @@ part = famepy.read_object(db, "s", first_index=first_index + 1, last_index=first
 
 Kinds: `precision` (float64), `numeric` (float32), `boolean` (int32 codes),
 `date` (int64 indices plus the value frequency), `string` (bytes) and
-`namelist` (scalar bytes). Scalar reads return exact-width NumPy scalars
+`namelist` (scalar bytes; `famepy.namelist_members(value)` gives the ordered
+members, since the library may lay the list text out differently from what
+was written). Scalar reads return exact-width NumPy scalars
 (for example `numpy.float32` for numeric objects). Missing NC/NA/ND
 encodings are preserved; buffers must already have the exact dtype, native
 byte order and contiguity. The caller's array is never modified. Every
@@ -77,11 +82,13 @@ output = famepy.run_command("display 2+2")  # bytes of captured output
 famepy.run_command("input setup", base_dir=".", quiet=True)  # recursive INPUT expansion
 ```
 
-Listing leaves `ITEM CLASS`, `ITEM TYPE`, `ITEM FREQUENCY` and `ITEM ALIAS`
-set to ON afterwards (a documented normalization, not a restoration). The
-`frequencies` filter takes exact frequency names or codes (`"monthly"`, `129`,
-`["monthly", "case"]`) and is enforced on the listed metadata; `"quarterly"`
-alone is refused. A failed command raises `CommandError` whose `stage` says
+Listing leaves `ITEM CLASS`, `ITEM TYPE`, `ITEM FREQUENCY`, `ITEM INDEX` and
+`ITEM ALIAS` set to ON afterwards (a documented normalization, not a
+restoration). The `frequencies` filter takes exact frequency names or codes
+(`"monthly"`, `129`, `["monthly", "case"]`) and is enforced on the listed
+metadata; `"quarterly"` alone is refused. The library's family and index
+words narrow the native listing only where they cannot exclude a requested
+object. A failed command raises `CommandError` whose `stage` says
 whether the output redirection, the command itself or the restoration
 returned the status; partial output stays on `error.output`.
 

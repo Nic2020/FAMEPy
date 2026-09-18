@@ -30,7 +30,8 @@ class Signature:
 
 
 # cfm functions have an additional leading status pointer and return void.
-# fame functions return their status. Mutable text always uses writable buffers.
+# fame functions return their status. Text the library may modify (``C``)
+# always travels in an owned writable buffer; ``S`` is input-only text.
 SIGNATURES: dict[str, Signature] = {
     "cfmini": Signature("cfm", ()),
     "cfmfin": Signature("cfm", ()),
@@ -38,15 +39,15 @@ SIGNATURES: dict[str, Signature] = {
     "cfmferr": Signature("cfm", (C,)),
     "cfmfame": Signature("cfm", (S,)),
     "cfmopwk": Signature("cfm", (PI,)),
-    "cfmopdb": Signature("cfm", (PI, S, INT32)),
+    "cfmopdb": Signature("cfm", (PI, C, INT32)),
     "cfmpodb": Signature("cfm", (INT32,)),
     "cfmcldb": Signature("cfm", (INT32,)),
-    "cfmsopt": Signature("cfm", (S, S)),
-    "cfmnlen": Signature("cfm", (INT32, S, INT32, PI)),
-    "cfmgtnl": Signature("cfm", (INT32, S, INT32, C, INT32, PI)),
-    "cfmwtnl": Signature("cfm", (INT32, S, INT32, S)),
-    "cfmdlob": Signature("cfm", (INT32, S)),
-    "cfmnwob": Signature("cfm", (INT32, S, INT32, INT32, INT32, INT32, INT32)),
+    "cfmsopt": Signature("cfm", (C, C)),
+    "cfmnlen": Signature("cfm", (INT32, C, INT32, PI)),
+    "cfmgtnl": Signature("cfm", (INT32, C, INT32, C, INT32, PI)),
+    "cfmwtnl": Signature("cfm", (INT32, C, INT32, C)),
+    "cfmdlob": Signature("cfm", (INT32, C)),
+    "cfmnwob": Signature("cfm", (INT32, C, INT32, INT32, INT32, INT32, INT32)),
     "cfmispm": Signature("cfm", (ct.c_double, PI)),
     "cfmisnm": Signature("cfm", (ct.c_float, PI)),
     "cfmisbm": Signature("cfm", (INT32, PI)),
@@ -70,6 +71,22 @@ SIGNATURES: dict[str, Signature] = {
     "fame_write_dates": Signature("fame", (INT32, S, R, INT32, PJ)),
     "fame_write_strings": Signature("fame", (INT32, S, R, ct.POINTER(S))),
     "fame_date_missing_type": Signature("fame", (J, PI)),
+}
+
+# Text arguments the older calling convention documents as both input and
+# output (the library trims and upper-cases them in place), by position after
+# the status pointer. The binding never passes immutable Python bytes there:
+# each gets an owned NUL-terminated copy that lives for the call. Every other
+# text argument is documented as input only (the newer convention declares
+# its inputs const).
+WRITABLE_TEXT: dict[str, tuple[int, ...]] = {
+    "cfmopdb": (1,),
+    "cfmsopt": (0, 1),
+    "cfmnlen": (1,),
+    "cfmgtnl": (1,),
+    "cfmwtnl": (1, 3),
+    "cfmdlob": (1,),
+    "cfmnwob": (1,),
 }
 
 # Declared in the installed headers on both inspected installations, needed to

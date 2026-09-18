@@ -16,7 +16,13 @@ from collections.abc import Mapping
 
 
 class AccessMode(enum.IntEnum):
-    """The seven reference database access modes."""
+    """The seven reference database access modes.
+
+    Only the first five are local modes of the database open the package
+    binds. ``WRITE`` and ``DIRECT_WRITE`` are modes of a database opened on
+    a named server connection, an API neither the package nor the reference
+    binds; they are kept for parity and refused by ``open_database``.
+    """
 
     READONLY = 1
     CREATE = 2
@@ -25,6 +31,16 @@ class AccessMode(enum.IntEnum):
     SHARED = 5
     WRITE = 6
     DIRECT_WRITE = 7
+
+
+# Modes accepted by the local database open the package binds.
+LOCAL_ACCESS_MODES: tuple[AccessMode, ...] = (
+    AccessMode.READONLY,
+    AccessMode.CREATE,
+    AccessMode.OVERWRITE,
+    AccessMode.UPDATE,
+    AccessMode.SHARED,
+)
 
 
 class ObjectClass(enum.IntEnum):
@@ -136,6 +152,16 @@ FREQUENCY_NAMES: Mapping[int, str] = {code: name for name, code in FREQUENCIES.i
 FREQUENCY_UNDEFINED = 0
 FREQUENCY_MONTHLY = 129
 FREQUENCY_CASE = 232
+
+# Listing selectors: each date-indexed frequency belongs to one family that
+# the ``ITEM FREQUENCY <family>`` option selects. Case series are selected by
+# the index option (``ITEM INDEX CASE``) and scalars have no frequency, so
+# neither has a family here.
+FREQUENCY_FAMILIES: Mapping[int, str] = {
+    code: ("USERDEFINED" if name == "weekly_pattern" else name.split("_", 1)[0].upper())
+    for name, code in FREQUENCIES.items()
+    if name not in ("undefined", "case")
+}
 
 # Namelist "all items" selector used by the reference for cfmnlen/cfmgtnl/cfmwtnl.
 NAMELIST_ALL = -1

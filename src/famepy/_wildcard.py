@@ -5,17 +5,24 @@
 
 ITEM options are process-global inside the library and there is no declared
 call to read them back, so the package cannot restore an arbitrary prior
-state. ``list_objects`` therefore *normalizes* the four options it uses
-(CLASS, TYPE, FREQUENCY, ALIAS) to ON when it finishes, whatever they were
-before. Commands that changed those options must set them again afterwards.
+state. ``list_objects`` therefore *normalizes* the five options it uses
+(CLASS, TYPE, FREQUENCY, INDEX, ALIAS) to ON when it finishes, whatever they
+were before. Commands that changed those options must set them again.
 
 The frequency filter is a package contract enforced on the metadata of the
 listed objects: an object is returned only when its frequency code is one
-of those requested. The ``ITEM FREQUENCY`` selection is still set natively
-(and any option error surfaces), but the first native campaign observed no
-effect from it on either host, so the package does not rely on it. Only
-exact frequency names or codes from the frequency table are accepted; a
-family word such as ``quarterly`` is refused rather than interpreted.
+of those requested. Only exact frequency names or codes from the frequency
+table are accepted; a family word such as ``quarterly`` is refused rather
+than interpreted. Natively, the library's own selectors are families
+(``ITEM FREQUENCY MONTHLY``, ``ITEM FREQUENCY QUARTERLY``, ...) for
+date-indexed series and an index category (``ITEM INDEX CASE``) for case
+series; there is no per-anchor selector and no frequency selector for case
+series. The listing narrows the native selection with those documented
+words only when doing so cannot exclude a requested object: by families
+when every requested frequency is date-indexed, by the case index when only
+``case`` is requested, and not at all otherwise (for example when scalars,
+which have the undefined frequency, are requested together with series).
+The result never depends on the native narrowing; any option error surfaces.
 """
 
 from __future__ import annotations
@@ -23,7 +30,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from ._constants import (
-    FREQUENCY_NAMES,
+    FREQUENCY_CASE,
+    FREQUENCY_FAMILIES,
     NAME_CAPACITY,
     ObjectClass,
     ObjectType,
@@ -42,11 +50,12 @@ from ._errors import (
 from ._objects import ObjectInfo, query_info
 from ._text import to_native
 
-_FILTERS = ("CLASS", "TYPE", "FREQUENCY")
+_FILTERS = ("CLASS", "TYPE", "FREQUENCY", "INDEX")
 NORMALIZED_OPTIONS: tuple[tuple[bytes, bytes], ...] = (
     (b"ITEM CLASS", b"ON"),
     (b"ITEM TYPE", b"ON"),
     (b"ITEM FREQUENCY", b"ON"),
+    (b"ITEM INDEX", b"ON"),
     (b"ITEM ALIAS", b"ON"),
 )
 
@@ -102,6 +111,27 @@ def _frequency_filter(values: Iterable[str | int] | str | int | None) -> set[int
     return codes or None
 
 
+def native_selectors(codes: set[int] | None) -> dict[str, list[bytes]]:
+    """The documented ``ITEM FREQUENCY`` / ``ITEM INDEX`` words for a code set.
+
+    Empty lists leave the option at ON (no native narrowing). Families are
+    used only when every requested code is date-indexed; the case index only
+    when ``case`` alone is requested. Anything else stays broad so that the
+    metadata filter, not the native selection, decides.
+    """
+    selectors: dict[str, list[bytes]] = {"FREQUENCY": [], "INDEX": []}
+    if not codes:
+        return selectors
+    if all(code in FREQUENCY_FAMILIES for code in codes):
+        selectors["FREQUENCY"] = [
+            family.encode("ascii")
+            for family in sorted({FREQUENCY_FAMILIES[code] for code in codes})
+        ]
+    elif codes == {FREQUENCY_CASE}:
+        selectors["INDEX"] = [b"CASE"]
+    return selectors
+
+
 def _normalize_options(native: object) -> list[FameError]:
     """Set every listing option to ON; attempt all of them and return failures."""
     failures: list[FameError] = []
@@ -128,8 +158,8 @@ def list_objects(
     The ITEM options are set for the listing and normalized to ON afterwards
     within the same locked operation (see the module note). ``frequencies``
     takes exact frequency names or codes; the result contains only objects
-    whose frequency code is one of them, whatever the native option did (a
-    scalar has the undefined frequency and is listed only when that is
+    whose frequency code is one of them, whatever the native selection did
+    (a scalar has the undefined frequency and is listed only when that is
     requested). Names longer than
     ``capacity`` bytes raise NameTruncatedError with the returned length,
     because the cursor cannot re-fetch that entry. Scalars are re-queried with
@@ -144,9 +174,7 @@ def list_objects(
     filters = {
         "CLASS": _values("CLASS", classes),
         "TYPE": _values("TYPE", types),
-        "FREQUENCY": [
-            FREQUENCY_NAMES[code].upper().encode("ascii") for code in sorted(wanted_codes or ())
-        ],
+        **native_selectors(wanted_codes),
     }
     results: list[ObjectInfo] = []
     with database.operation("list objects") as native:

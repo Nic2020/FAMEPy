@@ -13,28 +13,35 @@ Conventions: `cfm*` functions return `void` and take a leading `int *status`
 index start; index end}` with offsets 0/8/16 and alignment 8. Text is passed
 as NUL-terminated `char *`; the package sends NUL-free bytes and accepts only
 ASCII `str` values in this release. "Owned" means the package allocates the
-buffer and keeps it alive for the call.
+buffer and keeps it alive for the call. Every text argument carries its
+direction: `in/out text` is text the older calling convention lets the
+library rewrite in place (trimmed, upper-cased), so the binding passes an
+owned NUL-terminated copy (`char *`), never the caller's bytes; `input text`
+is documented as input only (`const char *` in the newer convention) and is
+passed as given. Pointer widths are the same either way; the distinction
+is ownership, and it must be confirmed against the installed header per
+host like every other row rather than inferred from a passing width check.
 
 | Function | Candidate arguments (after status where applicable) | Direction and ownership | Used by |
 |---|---|---|---|
 | cfmini | none | initializes the library; requires the FAME environment variable for licensing | lifecycle |
 | cfmfin | none | finalizes; all handles become invalid | lifecycle |
 | cfmver | `float *version` | output, owned 4-byte float | lifecycle |
-| cfmfame | `const char *command` | input text, NUL-terminated, at most 2**20 bytes (reference-derived bound) | commands |
+| cfmfame | `char *command` | input text, NUL-terminated, at most 2**20 bytes (reference-derived bound) | commands |
 | cfmopwk | `int *key` | output database key | database |
-| cfmopdb | `int *key, const char *name, int mode` | output key; input text; mode 1-7 | database |
+| cfmopdb | `int *key, char *name, int mode` | output key; in/out text (owned copy; the library trims it); mode 1-5 for this local open (6 and 7 are modes of the open on a named server connection, which is not bound, and are refused before the call; the local open is documented to return the bad-mode status for them) | database |
 | cfmpodb | `int key` | posts updates | database |
 | cfmcldb | `int key` | closes without posting | database |
-| cfmsopt | `const char *option, const char *value` | input texts, for example `ITEM CLASS` / `ON` | discovery |
-| cfmnlen | `int key, const char *name, int item(-1), int *length` | output length excluding terminator | raw data |
-| cfmgtnl | `int key, const char *name, int item(-1), char *buffer, int capacity, int *length` | owned writable buffer of capacity+1 bytes | raw data |
-| cfmwtnl | `int key, const char *name, int item(-1), const char *text` | input text | raw data |
-| cfmdlob | `int key, const char *name` | deletes; status 13 when absent | raw data |
-| cfmnwob | `int key, const char *name, int class, int frequency, int type, int basis, int observed` | creates an empty object | raw data |
+| cfmsopt | `char *option, char *value` | in/out texts (owned copies; the library trims and upper-cases both), for example `ITEM CLASS` / `ON`; frequency selections use the documented family words (`ITEM FREQUENCY MONTHLY`, ...) and index selections `ITEM INDEX CASE` / `DATE` | discovery |
+| cfmnlen | `int key, char *name, int item(-1), int *length` | in/out name (owned copy); output length excluding terminator | raw data |
+| cfmgtnl | `int key, char *name, int item(-1), char *buffer, int capacity, int *length` | in/out name (owned copy); owned writable buffer of capacity+1 bytes; the whole list comes back as members within braces separated by commas, in the library's own layout | raw data |
+| cfmwtnl | `int key, char *name, int item(-1), char *text` | in/out name and in/out list text (owned copies; the library trims and upper-cases them) | raw data |
+| cfmdlob | `int key, char *name` | in/out name (owned copy); deletes; status 13 when absent | raw data |
+| cfmnwob | `int key, char *name, int class, int frequency, int type, int basis, int observed` | in/out name (owned copy); creates an empty object | raw data |
 | cfmispm | `double value, int *type` | classification output 0-4 | raw data |
 | cfmisnm | `float value, int *type` | classification output | raw data |
 | cfmisbm | `int value, int *type` | classification output | raw data |
-| cfmissm | `const char *value, int *type` | classification output | raw data |
+| cfmissm | `char *value, int *type` | input text; classification output | raw data |
 | fame_index_to_year_period | `int frequency, index value, int *year, int *period` | outputs owned | bridge |
 | fame_year_period_to_index | `int frequency, index *out, int year, int period` | 64-bit output (the reference declares this inconsistently; the 64-bit form is used) | bridge |
 | fame_quick_info | `int key, const char *name, int *class, int *type, int *frequency, index *first, index *last` | outputs owned | all |
@@ -75,6 +82,7 @@ the bitwise form is relied on.
 | Constant | Value used | Source |
 |---|---|---|
 | HSUCC | 0 | reference |
+| HBMODE | 5 | vendor status help (bad or unauthorized access mode, or database not open for the requested access); returned by the local open for modes 6 and 7 on both inspected installations |
 | HNOOBJ | 13 | reference; header-confirmed |
 | HTRUNC | 18 | header-confirmed on both inspected installations |
 | HBOPT | 67 | reference; header-confirmed |
@@ -88,11 +96,13 @@ Unknowns to record per host: the `cfmlerr` declaration, the text encoding the
 library expects for names, paths and commands, and whether initialization has
 root-level dependency requirements beyond the library directory. Both hosts
 confirmed that initialization happens once per process and that
-finalization is the last native call. Open behavioral questions the
-campaign records rather than assumes: the meaning of the status returned by
-`cfmopdb` for the `write` and `direct_write` modes and their prerequisites;
-the rule for missing observations at the ends of a written range (leading
-or trailing ND, NC, NA and all-ND ranges) per value type; the accepted
-spelling and effect of the `ITEM FREQUENCY` selection on `fame_init_wildcard`;
-and the `cfmfame` output redirection syntax and behavior when the named
-file does not exist.
+finalization is the last native call. Per host, the campaign records rather
+than assumes: the rule for missing observations at the ends of a written
+range per value type (both inspected installations dropped leading and
+trailing ND, emptied all-ND ranges and kept NC and NA endpoints); the
+layout the library uses for a whole namelist (nine bytes for a three-member
+list on both); and the counts the documented family and index words select
+on their own. Whether a given installation's header matches these
+candidate directions, and whether its release honors the documented family
+and index words, is confirmed per host by the checklist review and the
+campaign, never assumed from documentation.

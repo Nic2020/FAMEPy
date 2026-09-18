@@ -14,6 +14,12 @@ Value kinds and their storage:
 | string    | bytes                 | list of bytes           |
 | namelist  | bytes                 | (scalar only)           |
 
+A namelist value is the library's own text of the list (braces, comma
+separated members). The library documents that it may lay that text out
+differently from what was written, so ``namelist_members`` parses the
+returned bytes into the ordered members under a strict grammar; the raw
+bytes are kept untouched on the scalar.
+
 Reads return exact-width NumPy scalars so that every bit pattern, including
 NaN payloads used as missing encodings, survives a round trip. Writes accept
 Python numbers too; a Python float written as ``numeric`` is rounded to
@@ -55,6 +61,9 @@ from ._objects import ObjectInfo, check_supported_class, query_info
 from ._text import object_name, to_native
 
 KINDS = ("precision", "numeric", "boolean", "date", "string", "namelist")
+# Characters allowed in a namelist member as returned by the library: any
+# printable ASCII except the structural characters and whitespace.
+_MEMBER_EXCLUDED = frozenset(b"{}, \t\r\n")
 _DTYPES: dict[str, np.dtype[Any]] = {
     "precision": np.dtype(np.float64),
     "numeric": np.dtype(np.float32),
@@ -68,6 +77,34 @@ _TYPE_CODES = {
     "string": int(ObjectType.STRING),
     "namelist": int(ObjectType.NAMELIST),
 }
+
+
+def namelist_members(value: bytes) -> tuple[bytes, ...]:
+    """The ordered members of a namelist's text, or ``DataValidationError``.
+
+    The grammar is deliberately narrow: an opening brace, members separated
+    by commas, a closing brace, with optional ASCII blanks around members and
+    inside an empty list. A member is one or more printable ASCII bytes other
+    than braces, commas and blanks; blanks inside a member, an empty member,
+    a missing brace or anything after the closing brace is refused. Members
+    are returned exactly as spelled (no case change, no de-duplication).
+    """
+    if not isinstance(value, bytes):
+        raise DataValidationError("A namelist value must be bytes.")
+    if len(value) < 2 or value[:1] != b"{" or value[-1:] != b"}":
+        raise DataValidationError("A namelist must be enclosed in braces.")
+    body = value[1:-1]
+    if not body.strip(b" \t"):
+        return ()
+    members: list[bytes] = []
+    for part in body.split(b","):
+        member = part.strip(b" \t")
+        if not member:
+            raise DataValidationError("A namelist member is empty.")
+        if any(byte in _MEMBER_EXCLUDED or not 0x20 < byte < 0x7F for byte in member):
+            raise DataValidationError("A namelist member contains an unsupported byte.")
+        members.append(member)
+    return tuple(members)
 
 
 def _kind_from_type(code: int) -> str:

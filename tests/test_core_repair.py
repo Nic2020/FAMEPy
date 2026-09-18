@@ -392,32 +392,16 @@ def test_a_failure_inside_one_object_does_not_abort_later_objects(tmp_path, chil
 # -- 4. write / direct-write fixtures -----------------------------------------------
 
 
-def test_mode_fixtures_distinguish_existing_and_new_paths(tmp_path, child_env):
+def test_mode_fixtures_keep_the_existing_database_and_the_new_path_apart(tmp_path, child_env):
+    """The connection modes are checked on both an existing fixture and an absent path."""
     report = validation.run(_options(tmp_path, "make_validation_backend", ["database"]))
     assert report["result"] == "PASS"
     cases = _cases(report["groups"]["database"])
     for mode in ("write", "direct_write"):
         assert cases[f"mode_{mode}_fixture"]["status"] == "pass"
-        assert cases[f"mode_{mode}"]["status"] == "pass"
-        assert cases[f"mode_{mode}_persisted"]["actual"] == ["ADDED", "BASE"]
-        new = cases[f"mode_{mode}_new_path"]
-        assert new["observation"] is True and new["actual"] == 906  # fake: missing file
-        assert cases[f"mode_{mode}_new_path_file_exists"]["actual"] is False
-
-
-def test_refused_modes_fail_and_are_never_relabeled(tmp_path, child_env):
-    report = validation.run(_options(tmp_path, "make_mode_refusing_backend", ["database"]))
-    assert report["result"] == "FAIL"
-    record = report["groups"]["database"]
-    cases = _cases(record)
-    for mode in ("write", "direct_write"):
-        assert cases[f"mode_{mode}"]["status"] == "fail"
-        assert cases[f"mode_{mode}"]["status_code"] == 5
-        assert cases[f"mode_{mode}_persisted"]["status"] == "fail"
-        assert cases[f"mode_{mode}_new_path"]["actual"] == 5
-        assert f"mode_{mode}" in record["required_not_passed"]
-    assert cases["mode_update"]["status"] == "pass"
-    assert record["counts"]["unsupported"] == 0
+        assert cases[f"mode_{mode}_fixture_unchanged"]["actual"] == ["BASE"]
+        assert cases[f"mode_{mode}_new_path_absent"]["actual"] is False
+    # The mode contract itself is covered in test_compatibility.
 
 
 # -- 5. frequency filtering --------------------------------------------------------
@@ -479,12 +463,13 @@ def test_frequency_option_is_still_set_and_normalized(mixed):
     # After the listing every option is back to ON, including the frequency selection.
     assert fake.options[b"ITEM FREQUENCY"] == b"ON"
     assert not any(key.startswith(b"ITEM FREQUENCY ") for key in fake.options)
-    # The native selection has no effect in the fake (as observed natively); the
-    # observation helper shows that, without the package filter.
+    # The observation helper applies the family word alone, without the
+    # package filter: the fake models it as documented (date-indexed series
+    # only), so the case series and the scalars stay listed.
     count = native_listing_count(
         mixed, "?", [(b"ITEM FREQUENCY", b"OFF"), (b"ITEM FREQUENCY MONTHLY", b"ON")]
     )
-    assert count == 6
+    assert count == 5
     assert fake.options[b"ITEM FREQUENCY"] == b"ON"
 
 

@@ -22,8 +22,8 @@ from types import TracebackType
 from typing import Any
 
 from . import _runtime
-from ._constants import AccessMode, access_mode
-from ._errors import StaleHandleError
+from ._constants import LOCAL_ACCESS_MODES, AccessMode, access_mode
+from ._errors import StaleHandleError, UnsupportedOperationError
 from ._native import NativeInterface
 from ._runtime import Session, current_session
 from ._text import to_native
@@ -144,8 +144,12 @@ def open_database(
     """Open a local database path or remote connection string.
 
     ``mode`` accepts the seven reference modes as integers 1-7, names such as
-    ``"readonly"`` or ``"direct_write"``, or AccessMode members. The connection
-    text is never stored on the handle or included in errors.
+    ``"readonly"`` or ``"update"``, or AccessMode members, but only the five
+    local modes can be opened: ``write`` and ``direct_write`` are modes of a
+    database opened on a named server connection, which this release does
+    not bind, so they raise ``UnsupportedOperationError`` before any native
+    call instead of being remapped. The connection text is never stored on
+    the handle or included in errors.
     """
     if isinstance(name, os.PathLike):
         name = os.fspath(name)
@@ -153,6 +157,12 @@ def open_database(
         raise ValueError("A database name or connection string is required.")
     text = to_native(name, what="database name")
     selected = access_mode(mode)
+    if selected not in LOCAL_ACCESS_MODES:
+        raise UnsupportedOperationError(
+            f"Access mode {selected.name.lower()} needs a database opened on a named "
+            "server connection, which this release does not bind; the local open "
+            "accepts readonly, create, overwrite, update and shared."
+        )
     owner = current_session() if session is None else session
     with owner.operation("open database") as native:
         key = native.open_database(text, int(selected))

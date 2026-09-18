@@ -10,13 +10,19 @@ documented below. Float32 values are stored as ``numpy.float32`` so that
 bit patterns survive.
 
 Behaviors observed on both protected hosts and modeled here on purpose:
-string missing sentinels are two bytes that are not ASCII text; the
-``ITEM FREQUENCY <name>`` selection is accepted but has no effect on the
-wildcard (class, type and alias selections do); a command displayed while
-no redirection is active goes to the C-level standard output of the
-process. Endpoint behavior of missing observations and the prerequisites
-of the write/direct-write modes are not established, so the fake stores
-exactly what is written and accepts those modes on an existing database.
+string missing sentinels are two bytes that are not ASCII text; the local
+database open rejects the write and direct-write modes with the bad-mode
+status (5) and creates nothing; an ``ITEM FREQUENCY`` word that is not a
+documented family (``CASE``, an anchored name) is a bad option (67); a
+command displayed while no redirection is active goes to the C-level
+standard output of the process. The documented selector semantics are
+modeled as documented, not as observed: ``ITEM FREQUENCY <family>`` narrows
+date-indexed series by family, ``ITEM INDEX CASE``/``DATE`` narrows series
+by index kind, and neither touches scalars. Endpoint handling of missing
+observations is measured per campaign, so the fake stores exactly what is
+written. A namelist reads back exactly as written by default; the library
+documents no fixed layout, so variants exist for a different layout and for
+corrupted members.
 
 Intentionally faulty variants (``make_*_backend``) exist so that the
 validation runner can be shown to report FAIL/BLOCKED for each defect.
@@ -35,10 +41,23 @@ from typing import Any
 
 import numpy as np
 
-from famepy._constants import FREQUENCY_MONTHLY, FREQUENCY_UNDEFINED
+from famepy._constants import (
+    FREQUENCY_CASE,
+    FREQUENCY_FAMILIES,
+    FREQUENCY_MONTHLY,
+    FREQUENCY_UNDEFINED,
+)
 from famepy._native import RangeSpec, Sentinels, WildcardEntry
 
-HSUCC, HFIN, HNOOBJ, HTRUNC, HBOPT, HFAMER = 0, 3, 13, 18, 67, 513
+HSUCC, HFIN, HBMODE, HNOOBJ, HTRUNC, HBOPT, HFAMER = 0, 3, 5, 13, 18, 67, 513
+# Documented ITEM option words the fake accepts; anything else is a bad option.
+OPTION_LABELS: dict[bytes, frozenset[bytes]] = {
+    b"ALIAS": frozenset(),
+    b"CLASS": frozenset({b"FORMULA", b"GLFORMULA", b"GLNAME", b"SCALAR", b"SERIES"}),
+    b"TYPE": frozenset({b"BOOLEAN", b"DATE", b"NAMELIST", b"NUMERIC", b"PRECISION", b"STRING"}),
+    b"FREQUENCY": frozenset(f.encode("ascii") for f in FREQUENCY_FAMILIES.values()),
+    b"INDEX": frozenset({b"CASE", b"DATE"}),
+}
 # Synthetic statuses used only by this fake.
 S_NOT_INITIALIZED = 901
 S_ALREADY_INITIALIZED = 902
@@ -149,7 +168,11 @@ class FakeNative:
     stream_noise: bool = False
     refuse_redirect: int | None = None
     refuse_restore: int | None = None
-    refuse_modes: dict[int, int] = field(default_factory=dict)
+    refuse_modes: dict[int, int] = field(default_factory=lambda: {6: HBMODE, 7: HBMODE})
+    create_on_refusal: bool = False
+    refuse_options: set[bytes] = field(default_factory=set)
+    namelist_layout: str | None = None
+    namelist_corruption: str | None = None
     refuse_objects: dict[str, int] = field(default_factory=dict)
     trim_nd: bool = False
     drop_neighbour: bool = False
@@ -259,6 +282,9 @@ class FakeNative:
         if not 1 <= mode <= 7:
             raise FakeStatus(S_BAD_MODE)
         if mode in self.refuse_modes:
+            if self.create_on_refusal and self.persist:
+                # A defective library: refuses the mode but leaves a file behind.
+                self._store_path(name).write_bytes(pickle.dumps({}))
             raise FakeStatus(self.refuse_modes[mode])
         text = name.decode("ascii")
         if self.persist:
@@ -528,7 +554,16 @@ class FakeNative:
         obj = self._object(key, name)
         if obj.kind() != "namelist":
             raise FakeStatus(S_TYPE_MISMATCH)
-        return bytes(obj.values[0]) if obj.values else b""
+        stored = bytes(obj.values[0]) if obj.values else b""
+        if self.namelist_layout is None and self.namelist_corruption is None:
+            return stored
+        members = [m.strip() for m in stored[1:-1].split(b",") if m.strip()]
+        if self.namelist_corruption == "reorder" and len(members) > 1:
+            members = members[::-1]
+        elif self.namelist_corruption == "drop" and members:
+            members = members[:-1]
+        separator = b", " if self.namelist_layout == "blank_after_comma" else b","
+        return b"{" + separator.join(members) + b"}"
 
     def write_namelist(self, key: int, name: bytes, value: bytes) -> None:
         self._enter("cfmwtnl")
@@ -542,7 +577,15 @@ class FakeNative:
 
     def set_option(self, name: bytes, value: bytes) -> None:
         self._enter("cfmsopt")
-        if not name.startswith(b"ITEM ") or value not in (b"ON", b"OFF"):
+        words = name.split(b" ")
+        if (
+            len(words) not in (2, 3)
+            or words[0] != b"ITEM"
+            or words[1] not in OPTION_LABELS
+            or (len(words) == 3 and words[2] not in OPTION_LABELS[words[1]])
+            or value not in (b"ON", b"OFF")
+            or name in self.refuse_options
+        ):
             raise FakeStatus(HBOPT)
         if name.count(b" ") == 1:
             # Setting the option itself clears its per-value selections.
@@ -560,9 +603,16 @@ class FakeNative:
 
         class_label = ObjectClass(obj.class_code).name.encode()
         type_label = b"DATE" if obj.type_code >= 8 else ObjectType(obj.type_code).name.encode()
-        # ITEM FREQUENCY selections are accepted but not applied (observed on
-        # both hosts); the package filters by metadata instead.
-        return allowed(b"CLASS", class_label) and allowed(b"TYPE", type_label)
+        if not (allowed(b"CLASS", class_label) and allowed(b"TYPE", type_label)):
+            return False
+        if obj.class_code != ObjectClass.SERIES:
+            return True  # frequency and index selectors are about series
+        if obj.frequency == FREQUENCY_CASE:
+            return allowed(b"INDEX", b"CASE")
+        family = FREQUENCY_FAMILIES.get(obj.frequency)
+        return allowed(b"INDEX", b"DATE") and (
+            family is None or allowed(b"FREQUENCY", family.encode("ascii"))
+        )
 
     def init_wildcard(self, key: int, pattern: bytes) -> int:
         self._enter("fame_init_wildcard")
@@ -896,14 +946,65 @@ def make_classifier_failing_backend() -> StatusAdapter:
     return adapter
 
 
-def make_mode_refusing_backend() -> StatusAdapter:
-    """Write and direct-write opens return status 5, as both hosts did.
+def make_mode_accepting_backend() -> StatusAdapter:
+    """A local open that accepts the write and direct-write modes.
 
-    The database group must FAIL (not downgrade or relabel) until the mode
-    prerequisites are established.
+    That contradicts the documented local open, so the database group must
+    FAIL rather than treat the unexpected success as parity.
     """
     adapter = make_fake(persist=True)
-    adapter.fake.refuse_modes = {6: 5, 7: 5}
+    adapter.fake.refuse_modes = {}
+    return adapter
+
+
+def make_mode_side_effect_backend() -> StatusAdapter:
+    """Refuses the connection modes but leaves a file behind on a new path."""
+    adapter = make_fake(persist=True)
+    adapter.fake.create_on_refusal = True
+    return adapter
+
+
+def make_family_option_refusing_backend() -> StatusAdapter:
+    """``ITEM FREQUENCY MONTHLY`` is a bad option here.
+
+    The option error must surface in the listing cases that narrow by that
+    family (never be hidden), while every other discovery case still runs.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.refuse_options = {b"ITEM FREQUENCY MONTHLY"}
+    return adapter
+
+
+def make_index_option_refusing_backend() -> StatusAdapter:
+    """``ITEM INDEX CASE`` is a bad option here (see the family variant)."""
+    adapter = make_fake(persist=True)
+    adapter.fake.refuse_options = {b"ITEM INDEX CASE"}
+    return adapter
+
+
+def make_namelist_relayout_backend() -> StatusAdapter:
+    """Namelists read back with a blank after each comma.
+
+    Only the layout differs, which the library documents as its own
+    choice, so the campaign must still PASS with the layout observed.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.namelist_layout = "blank_after_comma"
+    return adapter
+
+
+def make_namelist_corrupting_backend() -> StatusAdapter:
+    """Namelists read back with their members reversed: must FAIL in both processes."""
+    adapter = make_fake(persist=True)
+    adapter.fake.namelist_layout = "blank_after_comma"
+    adapter.fake.namelist_corruption = "reorder"
+    return adapter
+
+
+def make_namelist_dropping_backend() -> StatusAdapter:
+    """Namelists read back without their last member: must FAIL in both processes."""
+    adapter = make_fake(persist=True)
+    adapter.fake.namelist_corruption = "drop"
     return adapter
 
 

@@ -260,6 +260,41 @@ class Recorder:
         self.add(Case(case_id, "fail", note="no error was raised"))
         return None
 
+    def expect(
+        self,
+        case_id: str,
+        function: Callable[[], Any],
+        expected: Any,
+        *,
+        note: str | None = None,
+    ) -> bool:
+        """Run ``function`` and compare its result: one case, whatever happens.
+
+        An exception records a failure with the error class and status (as
+        ``check`` does) instead of escaping, so consecutive predicates never
+        hide one another.
+        """
+        try:
+            actual = function()
+        except BaseException as error:  # noqa: BLE001 - recorded, never escapes
+            collect_bytes(expected, self.permitted)
+            self.add(
+                Case(
+                    case_id,
+                    "fail",
+                    expected=encode_value(expected, self.permitted),
+                    error_type=type(error).__name__,
+                    status_code=_status_of(error),
+                    errno=_errno_of(error),
+                    note=note or _stage_note(error),
+                    frames=_package_frames(error),
+                )
+            )
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                raise
+            return False
+        return self.equal(case_id, actual, expected, note=note)
+
     def equal(self, case_id: str, actual: Any, expected: Any, *, note: str | None = None) -> bool:
         ok = _equal(actual, expected)
         # The expected side is the runner's own fixture, so its bytes are

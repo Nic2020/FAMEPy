@@ -10,6 +10,7 @@ import operator
 # Status codes confirmed by header inspection on both inspected installations.
 HSUCC = 0
 HFIN = 3
+HBMODE = 5
 HNOOBJ = 13
 HTRUNC = 18
 HBOPT = 67
@@ -19,6 +20,8 @@ HFAMER = 513
 
 _MESSAGES = {
     HFIN: "CHLI was already finalized in this process; it initializes once per process.",
+    HBMODE: "Bad or unauthorized database access mode, or the database is not open "
+    "for the requested access.",
     HNOOBJ: "Object does not exist.",
     HTRUNC: "Data or text was truncated.",
     HBOPT: "Bad option.",
@@ -91,7 +94,7 @@ class LicensingConfigurationError(RuntimeStateError):
 
 
 class UnsupportedOperationError(RuntimeError):
-    """The operation needs vendor facts that have not been established."""
+    """The operation is not bound in this release or needs unestablished vendor facts."""
 
 
 class DataValidationError(ValueError):

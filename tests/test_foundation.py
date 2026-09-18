@@ -125,7 +125,9 @@ def test_fake_backend_status_and_signature():
         cfmopdb = Function()
 
     with pytest.raises(FameError, match="13"):
-        Binding(Backend()).call("cfmopdb", ct.byref(ct.c_int32()), b"synthetic", 1)
+        Binding(Backend()).call(
+            "cfmopdb", ct.byref(ct.c_int32()), ct.create_string_buffer(b"synthetic"), 1
+        )
     assert Backend.cfmopdb.restype is None
     assert len(Backend.cfmopdb.argtypes) == 4
 

@@ -6,15 +6,18 @@ The behavioral reference is
 [FAME.jl](https://github.com/bankofcanada/FAME.jl).
 
 **Status: pre-alpha. The operational core is implemented and tested offline
-against an in-memory fake backend and an independent C shim. No FAME
-compatibility has been verified yet; the native validation campaign has not
-run on an installed FAME.**
+against an in-memory fake backend and an independent C shim. Diagnostic
+campaigns on an installed FAME have verified the runtime lifecycle, command
+execution and the monthly bridge on one Windows and one Linux host; the
+remaining groups are corrected in this revision and await a native run
+(see [capability status](docs/capabilities.md)).**
 
-Implemented: runtime lifecycle, databases (seven access modes, work database,
-explicit posting), raw scalar and series I/O for precision, numeric, Boolean,
-date, string and namelist objects with preserved missing categories, wildcard
-listing with filters, command execution with recursive INPUT expansion, and a
-first TimeSeriesEconPy bridge for monthly precision scalars and series.
+Implemented: runtime lifecycle, databases (the five local access modes, work
+database, explicit posting), raw scalar and series I/O for precision,
+numeric, Boolean, date, string and namelist objects with preserved missing
+categories, wildcard listing with filters, command execution with recursive
+INPUT expansion, and a first TimeSeriesEconPy bridge for monthly precision
+scalars and series.
 Not implemented: other bridge frequencies, workspace and multivariate
 conversion, extended native error text (blocked on a vendor declaration).
 
