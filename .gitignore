@@ -1,0 +1,51 @@
+# Python environments, caches and build products
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+*.egg-info/
+.tox/
+.nox/
+.cache/
+
+# Compiled artifacts and local FAME installations
+*.dll
+*.so
+*.so.*
+*.dylib
+*.pyd
+*.o
+*.obj
+*.lib
+*.a
+vendor/
+
+# Local databases, diagnostics and reports; synthetic fixtures can be added
+# explicitly after review. Never add production databases to this repository.
+*.db
+*.db.*
+*.sqlite
+*.sqlite3
+test-results/
+local-results/
+*.log
+
+# Credentials and local editor settings
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~

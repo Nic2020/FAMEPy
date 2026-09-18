@@ -1,0 +1,17 @@
+# Normalize text in Git and use LF on Windows and Linux.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Native libraries and database fixtures must never undergo newline conversion.
+*.db binary
+*.db.gz binary
+*.sqlite binary
+*.sqlite3 binary
+*.dll binary
+*.so binary
+*.pyd binary
+*.whl binary
+*.png binary
+*.jpg binary
+*.pdf binary
