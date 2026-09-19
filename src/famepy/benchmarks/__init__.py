@@ -63,6 +63,8 @@ import numpy as np
 
 import famepy
 from famepy import bridge
+from famepy._errors import error_number
+from famepy._native import NativeInterface
 from famepy._runtime import Session
 from famepy.validation._process import (
     WorkerResult,
@@ -110,6 +112,24 @@ NON_COMPARABLE: dict[str, str] = {
     "migration": "no reference equivalent",
 }
 MODES = ("warm", "cold")
+# The index of every fixture: every scenario spans a valid calendar range at
+# both scales (the standard missing-density fixture is 200 000 days from
+# 2000-01-03, well inside year 9999; 200 000 months would not be).
+FIXTURE_INDEX: dict[str, dict[str, str]] = {
+    "many_small": {"frequency": "monthly", "start": "2000M1"},
+    "few_large": {"frequency": "daily", "start": "2000-01-03"},
+    "dates": {"frequency": "monthly", "start": "2000M1"},
+    "strings": {"frequency": "case", "start": "1"},
+    "missing_density": {"frequency": "daily", "start": "2000-01-03"},
+    "migration": {"frequency": "monthly", "start": "2000M1"},
+}
+LAST_CALENDAR_YEAR = 9999
+# The native operations a failure record may name: the package's own
+# boundary methods, nothing the library or a scenario could invent.
+OPERATIONS: frozenset[str] = frozenset(
+    name for name, value in vars(NativeInterface).items() if callable(value) and name[0] != "_"
+)
+MAX_STATUS = 2**31
 _LCG_MULTIPLIER = 6364136223846793005
 _LCG_INCREMENT = 1442695040888963407
 _MASK = (1 << 64) - 1
@@ -194,10 +214,61 @@ def _strings_fixture(length: int) -> Any:
 def _missing_fixture(length: int) -> dict[str, Any]:
     ts = _ts()
     base = lcg_values(length, 17)
+    first = ts.daily("2000-01-03")
     return {
-        f"d{int(density * 100):02d}": ts.TSeries(ts.mm(2000, 1), with_missing(base, density, 19))
+        f"d{int(density * 100):02d}": ts.TSeries(first, with_missing(base, density, 19))
         for density in MISSING_DENSITIES
     }
+
+
+def fixture_domains(scale: dict[str, int]) -> dict[str, dict[str, Any]]:
+    """Index frequency, first moment (as its integer) and length per fixture.
+
+    Computed from the fixtures themselves, not from ``FIXTURE_INDEX``; the
+    Julia script reports the same record from its own fixtures and the
+    coordinator compares both with the declared index.
+    """
+    ts = _ts()
+    many = _series_batch(scale["many_small_count"], scale["many_small_length"], ts.Monthly(), 1)
+    large = _series_batch(scale["few_large_count"], scale["few_large_length"], ts.Daily(), 7)
+    dates = _dates_fixture(scale["dates_length"])
+    strings = _strings_fixture(scale["strings_length"])
+    missing = _missing_fixture(scale["missing_length"])
+
+    def domain(series: Any) -> dict[str, Any]:
+        return {
+            "frequency": _index_name(series.firstdate.frequency),
+            "start": int(series.firstdate),
+            "length": len(series),
+        }
+
+    return {
+        "many_small": domain(next(iter(many.values()))),
+        "few_large": domain(next(iter(large.values()))),
+        "dates": domain(dates),
+        "strings": domain(strings),
+        "missing_density": domain(next(iter(missing.values()))),
+    }
+
+
+def _index_name(frequency: Any) -> str:
+    ts = _ts()
+    if isinstance(frequency, ts.Daily):
+        return "daily"
+    if isinstance(frequency, ts.Monthly):
+        return "monthly"
+    if isinstance(frequency, ts.Unit):
+        return "case"
+    return type(frequency).__name__.lower()
+
+
+def fixture_end_year(frequency: str, start: int, length: int) -> int:
+    """The calendar year of the last observation of a fixture (case: 0)."""
+    if frequency == "daily":
+        return dt.date.fromordinal(start + length - 1).year
+    if frequency == "monthly":
+        return (start + length - 1) // 12
+    return 0
 
 
 def fixture_hashes(scale: dict[str, int]) -> dict[str, str]:
@@ -321,16 +392,47 @@ class Timer:
 
     @contextmanager
     def phase(self, name: str) -> Iterator[None]:
+        global _phase_in_progress
         record = self.phases.setdefault(name, Phase())
+        _phase_in_progress = name
+        # Leave the label on exceptions; clear it after either successful path.
         if self.counter is not None:
             before = self.counter.calls
             yield
             record.native_calls = self.counter.calls - before
-            return
-        gc.collect()
-        started = time.perf_counter()
-        yield
-        record.samples.append(time.perf_counter() - started)
+        else:
+            gc.collect()
+            started = time.perf_counter()
+            yield
+            record.samples.append(time.perf_counter() - started)
+        _phase_in_progress = None
+
+
+# The phase a scenario is in (a worker runs one scenario at a time).
+_phase_in_progress: str | None = None
+
+
+def failure_record(error: BaseException, scenario: str, mode: str) -> dict[str, Any]:
+    """The bounded diagnostics of a failed measurement: class name, numeric
+    status, an operation from the fixed allowlist and the phase in progress.
+    Nothing textual from the exception, the library or the scenario is
+    copied, so a private path or message cannot ride along.
+    """
+    global _phase_in_progress
+    record: dict[str, Any] = {"scenario": scenario, "mode": mode}
+    kind = type(error).__name__
+    if _ERROR_TYPE.fullmatch(kind):
+        record["error_type"] = kind
+    status = error_number(getattr(error, "status", None))
+    if status is not None:
+        record["status"] = status
+    operation = getattr(error, "operation", None)
+    if isinstance(operation, str) and operation in OPERATIONS:
+        record["operation"] = operation
+    if _phase_in_progress in PHASE_LABELS:
+        record["phase"] = _phase_in_progress
+    _phase_in_progress = None
+    return record
 
 
 # -- scenarios ----------------------------------------------------------------
@@ -403,7 +505,9 @@ def scenario_many_small(scale: dict[str, int]) -> Scenario:
             session, scratch, timer, repetition, _series_batch(count, length, _ts().Monthly(), 1)
         )
 
-    return Scenario("many_small", {"count": count, "length": length, "frequency": "monthly"}, run)
+    return Scenario(
+        "many_small", {"count": count, "length": length, **FIXTURE_INDEX["many_small"]}, run
+    )
 
 
 def scenario_few_large(scale: dict[str, int]) -> Scenario:
@@ -414,7 +518,9 @@ def scenario_few_large(scale: dict[str, int]) -> Scenario:
             session, scratch, timer, repetition, _series_batch(count, length, _ts().Daily(), 7)
         )
 
-    return Scenario("few_large", {"count": count, "length": length, "frequency": "daily"}, run)
+    return Scenario(
+        "few_large", {"count": count, "length": length, **FIXTURE_INDEX["few_large"]}, run
+    )
 
 
 def scenario_dates(scale: dict[str, int]) -> Scenario:
@@ -498,7 +604,13 @@ def scenario_missing_density(scale: dict[str, int]) -> Scenario:
         }
 
     return Scenario(
-        "missing_density", {"length": length, "densities": list(MISSING_DENSITIES)}, run
+        "missing_density",
+        {
+            "length": length,
+            "densities": list(MISSING_DENSITIES),
+            **FIXTURE_INDEX["missing_density"],
+        },
+        run,
     )
 
 
@@ -696,9 +808,8 @@ def worker_main(config: dict[str, Any]) -> int:
     try:
         session = build_session(config)
         session.initialize()
-    except Exception as error:  # noqa: BLE001 - reported by class name only
-        payload["error_type"] = type(error).__name__
-        write_result(config, payload)
+    except Exception as error:  # noqa: BLE001 - reported by bounded record only
+        write_result(config, failure_record(error, scenario.name, mode))
         return 31
     startup = time.perf_counter() - started
     code = 0
@@ -715,7 +826,7 @@ def worker_main(config: dict[str, Any]) -> int:
             payload["startup_seconds"] = round(startup, 6)
             payload["first_open_seconds"] = round(first_open, 6)
     except Exception as error:  # noqa: BLE001
-        payload = {"scenario": scenario.name, "mode": mode, "error_type": type(error).__name__}
+        payload = failure_record(error, scenario.name, mode)
         code = 32
     finally:
         try:
@@ -769,6 +880,8 @@ _SCENARIO_PHASES = {
     ),
     "migration": frozenset(("plan", "migrate", "read_back")),
 }
+# Every phase label a scenario can report; a failure record names one of these.
+PHASE_LABELS: frozenset[str] = frozenset().union(*_SCENARIO_PHASES.values())
 
 
 def _number(value: Any) -> bool:
@@ -891,24 +1004,53 @@ INSTRUMENTATION_NOTE = (
 )
 
 
-def _classify(result: WorkerResult) -> dict[str, Any] | None:
+FAILURE_FIELDS = frozenset(
+    {"scenario", "mode", "token", "complete", "error_type", "status", "operation", "phase"}
+)
+
+
+def failure_diagnostics(payload: Any, scenario: Scenario, mode: str) -> dict[str, Any]:
+    """The accepted diagnostics of a worker failure record, field by field.
+
+    A record with any field outside the fixed set, or a value outside its
+    bound or allowlist, contributes no diagnostics (``diagnostics:
+    rejected``); a failure never carries text, paths or timing data.
+    """
+    if not isinstance(payload, dict) or set(payload) - FAILURE_FIELDS:
+        return {"diagnostics": "rejected"}
+    if payload.get("scenario") != scenario.name or payload.get("mode") != mode:
+        return {"diagnostics": "rejected"}
+    accepted: dict[str, Any] = {}
+    kind = payload.get("error_type")
+    if kind is not None:
+        if not isinstance(kind, str) or not _ERROR_TYPE.fullmatch(kind):
+            return {"diagnostics": "rejected"}
+        accepted["error_type"] = kind
+    status = payload.get("status")
+    if status is not None:
+        if error_number(status) is None:
+            return {"diagnostics": "rejected"}
+        accepted["status"] = status
+    operation = payload.get("operation")
+    if operation is not None:
+        if not isinstance(operation, str) or operation not in OPERATIONS:
+            return {"diagnostics": "rejected"}
+        accepted["operation"] = operation
+    phase = payload.get("phase")
+    if phase is not None:
+        if not isinstance(phase, str) or phase not in _SCENARIO_PHASES[scenario.name]:
+            return {"diagnostics": "rejected"}
+        accepted["phase"] = phase
+    return accepted
+
+
+def _classify(result: WorkerResult, scenario: Scenario, mode: str) -> dict[str, Any] | None:
     """A failure record for a worker that did not complete, or None."""
     if result.returncode == 30:
         return {"error": "invalid_configuration"}
-    if result.returncode == 31:
-        record: dict[str, Any] = {"error": "backend_setup_failed"}
-        payload = result.payload or {}
-        kind = payload.get("error_type")
-        if isinstance(kind, str) and _ERROR_TYPE.fullmatch(kind):
-            record["error_type"] = kind
-        return record
-    if result.returncode == 32:
-        record = {"error": "scenario_failed"}
-        payload = result.payload or {}
-        kind = payload.get("error_type")
-        if isinstance(kind, str) and _ERROR_TYPE.fullmatch(kind):
-            record["error_type"] = kind
-        return record
+    if result.returncode in (31, 32):
+        error = "backend_setup_failed" if result.returncode == 31 else "scenario_failed"
+        return {"error": error, **failure_diagnostics(result.payload, scenario, mode)}
     if result.returncode != 0:
         return {"error": "worker_failed", "exit_code": result.returncode}
     if result.payload is None:
@@ -942,7 +1084,7 @@ def run_measurement(
         return {"error": "timeout", "duration_seconds": round(time.monotonic() - started, 3)}
     except OSError as error:
         return {"error": "start_failed", "errno": error.errno}
-    failure = _classify(result)
+    failure = _classify(result, scenario, mode)
     if failure is not None:
         failure["stray_output_bytes"] = result.log_bytes + result.pipe_bytes
         return failure
@@ -966,7 +1108,73 @@ def run_measurement(
     return record
 
 
+def comparison_report(
+    report: dict[str, Any], scenarios: list[Scenario], julia: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Candidate workload pairs versus completed, verified Python/Julia pairs.
+
+    A candidate pair is a scenario/phase the two workloads define alike. It
+    becomes a verified pair only when the Python warm measurement of that
+    scenario was accepted, the Julia run was accepted with its own read-back
+    verification, and the fixture digests and index domains agree for the
+    scenario. Nothing failed, absent or unverified is listed as comparable,
+    and no ratio is computed.
+    """
+    requested = {s.name for s in scenarios}
+    candidates = [
+        [name, phase]
+        for name in COMPARABLE_SCENARIOS
+        for phase in COMPARABLE_PHASES
+        if name in requested
+    ]
+    warm = report.get("warm", {})
+    python_accepted = {
+        name: name in warm and "error" not in warm[name] and "blocked" not in warm[name]
+        for name in COMPARABLE_SCENARIOS
+    }
+    comparison: dict[str, Any] = {
+        "candidate_pairs": candidates,
+        "python_accepted": {n: python_accepted[n] for n in COMPARABLE_SCENARIOS if n in requested},
+        "non_comparable": {
+            s.name: NON_COMPARABLE[s.name] for s in scenarios if s.name in NON_COMPARABLE
+        },
+        "julia": "absent",
+        "verified_pairs": [],
+        "note": "verified pairs list Python and reference timings side by side only where "
+        "both measurements completed and were verified on the same fixtures; no ratio is "
+        "computed; the Python samples ran without instrumentation and the reference "
+        "script has none",
+    }
+    if julia is None:
+        return comparison
+    if "error" in julia:
+        comparison["julia"] = "failed"
+        return comparison
+    comparison["julia"] = "verified"
+    comparison["julia_qualification"] = (
+        "pinned FAME.jl tree" if julia.get("fame_tree_pinned") else "unpinned FAME.jl tree"
+    )
+    hashes = {
+        name: julia["fixture_hashes"].get(name) == report["fixture_hashes"][name]
+        for name in COMPARABLE_SCENARIOS
+    }
+    domains = {
+        name: julia["fixture_domains"].get(name) == report["fixture_domains"][name]
+        for name in COMPARABLE_SCENARIOS
+    }
+    comparison["julia_fixtures_match"] = hashes
+    comparison["julia_domains_match"] = domains
+    comparison["verified_pairs"] = [
+        pair
+        for pair in candidates
+        if python_accepted[pair[0]] and hashes[pair[0]] and domains[pair[0]]
+    ]
+    return comparison
+
+
 def run(options: dict[str, Any]) -> dict[str, Any]:
+    if options.get("julia_selfcheck") and not options.get("julia"):
+        raise ValueError("julia_selfcheck requires a Julia executable and project")
     scale_name = options.get("scale", "small")
     if scale_name not in SCALES:
         raise ValueError("scale must be 'small' or 'standard'")
@@ -1038,39 +1246,28 @@ def run(options: dict[str, Any]) -> dict[str, Any]:
                     {"measurement": f"{mode}:{scenario.name}", **{k: record[k] for k in record}}
                 )
     report["fixture_hashes"] = fixture_hashes(scale)
-    comparison: dict[str, Any] = {
-        "comparable": [
-            [name, phase]
-            for name in COMPARABLE_SCENARIOS
-            for phase in COMPARABLE_PHASES
-            if any(s.name == name for s in scenarios)
-        ],
-        "non_comparable": {
-            s.name: NON_COMPARABLE[s.name] for s in scenarios if s.name in NON_COMPARABLE
-        },
-        "note": "Python and reference timings are listed side by side for the comparable "
-        "pairs only, no ratio is computed; the Python samples ran without instrumentation "
-        "and the reference script has none",
-    }
+    report["fixture_domains"] = fixture_domains(scale)
+    julia: dict[str, Any] | None = None
     if options.get("julia"):
-        from ._julia import run_julia_benchmark
+        from ._julia import run_julia_benchmark, run_julia_selfcheck
 
         julia = run_julia_benchmark(options["julia"], scratch, scale, repetitions, timeout)
         report["julia"] = julia
         if "error" in julia:
             failures.append({"measurement": "julia", "error": julia["error"]})
-        else:
-            matches = {
-                name: julia["fixture_hashes"].get(name) == report["fixture_hashes"][name]
-                for name in COMPARABLE_SCENARIOS
-            }
-            comparison["julia_fixtures_match"] = matches
-            comparison["comparable"] = [
-                pair for pair in comparison["comparable"] if matches.get(pair[0])
-            ]
-            if not all(matches.values()):
-                failures.append({"measurement": "julia", "error": "fixture_mismatch"})
-    report["comparison"] = comparison
+        if options.get("julia_selfcheck"):
+            selfcheck = run_julia_selfcheck(options["julia"], scratch, timeout)
+            report["julia_selfcheck"] = selfcheck
+            failures.extend(
+                {"measurement": f"julia_selfcheck:{case}", "error": "negative_case_not_detected"}
+                for case, outcome in selfcheck.items()
+                if outcome["outcome"] != "pass"
+            )
+    report["comparison"] = comparison_report(report, scenarios, julia)
+    if julia is not None and "error" not in julia:
+        for key in ("julia_fixtures_match", "julia_domains_match"):
+            if not all(report["comparison"][key].values()):
+                failures.append({"measurement": "julia", "error": key.replace("julia_", "")})
     report["failures"] = failures
     report["result"] = "complete" if not failures else "incomplete"
     return report
@@ -1079,6 +1276,11 @@ def run(options: dict[str, Any]) -> dict[str, Any]:
 __all__ = [
     "COMPARABLE_PHASES",
     "COMPARABLE_SCENARIOS",
+    "FAILURE_FIELDS",
+    "FIXTURE_INDEX",
+    "LAST_CALENDAR_YEAR",
+    "OPERATIONS",
+    "PHASE_LABELS",
     "INSTRUMENTATION_NOTE",
     "MEMORY_SCOPE",
     "MISSING_DENSITIES",
@@ -1092,6 +1294,11 @@ __all__ = [
     "Scenario",
     "Timer",
     "build_scenarios",
+    "comparison_report",
+    "failure_diagnostics",
+    "failure_record",
+    "fixture_domains",
+    "fixture_end_year",
     "fixture_hashes",
     "fnv1a64",
     "lcg_values",

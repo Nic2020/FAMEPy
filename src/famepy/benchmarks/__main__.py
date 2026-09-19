@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-sha", help="hexadecimal source revision (optionally -dirty)")
     parser.add_argument("--julia", help="Julia executable for the same-host FAME.jl comparison")
     parser.add_argument("--julia-project", help="Julia project containing FAME.jl")
+    parser.add_argument(
+        "--julia-selfcheck",
+        action="store_true",
+        help="also run the Julia negative verification cases at the small scale",
+    )
     parser.add_argument("--backend", help=argparse.SUPPRESS)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     return parser
@@ -68,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         "wheel": Path(args.wheel) if args.wheel else None,
         "source_sha": args.source_sha,
         "julia": {"executable": args.julia, "project": args.julia_project} if args.julia else None,
+        "julia_selfcheck": args.julia_selfcheck,
         "backend": args.backend,
     }
     try:
@@ -96,7 +102,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {mode} {name}: {phases}")
     julia = payload.get("julia")
     if julia is not None:
-        print("  julia: " + ("failed (" + julia["error"] + ")" if "error" in julia else "accepted"))
+        print("  julia: " + ("failed (" + julia["error"] + ")" if "error" in julia else "verified"))
+    for case, outcome in payload.get("julia_selfcheck", {}).items():
+        print(f"  julia negative {case}: {outcome['outcome']}")
+    print(f"verified pairs: {len(payload['comparison']['verified_pairs'])}")
     print(f"result: {payload['result']} ({len(payload['failures'])} failed measurement(s))")
     return 0 if payload["result"] == "complete" else 1
 

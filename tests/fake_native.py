@@ -1256,6 +1256,17 @@ def make_overlong_error_backend() -> StatusAdapter:
     return adapter
 
 
+def make_range_failing_backend() -> StatusAdapter:
+    """The first precision write fails with a range-style status.
+
+    The benchmark failure record must carry the numeric status, the
+    operation and the phase, and no timing data.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.fail_next["fame_write_precisions"] = 9
+    return adapter
+
+
 def make_benchmark_corrupting_backend() -> StatusAdapter:
     """One benchmark series reads back with invented values.
 

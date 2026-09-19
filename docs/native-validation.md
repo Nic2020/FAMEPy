@@ -277,7 +277,8 @@ python -m famepy.validation --native --scratch ./famepy-scratch --report ./famep
 python -m famepy.benchmarks --native --scale standard --scratch ./famepy-bench \
   --report ./famepy-bench.json \
   --wheel ./wheelhouse/famepy-<version>-py3-none-any.whl --source-sha <revision> \
-  --julia /path/to/julia --julia-project /path/to/project-with-FAME.jl
+  --julia /path/to/julia --julia-project /path/to/project-with-FAME.jl \
+  --julia-selfcheck
 ```
 
 Retain both reports with the same identity record (revision, wheel hash,
@@ -285,7 +286,12 @@ library version, OS and architecture, dependency versions, commands). The
 benchmark report is described in [benchmarks](benchmarks.md); its exit
 status is 1 and its `result` is `incomplete` when any requested
 measurement failed, timed out or was rejected, and the benchmark numbers
-never enter the validation PASS/FAIL.
+never enter the validation PASS/FAIL. A revision that changes only the
+benchmark package, its tests and docs is requalified with a benchmark-only
+run per host (all six scenarios warm and cold, the configured Julia
+comparison and its negative self-check on the host that has Julia); the
+ten-group validation acceptance of the shared runtime stands until shared
+runtime, bridge or raw code changes.
 
 For actual native groups, preflight requires an installed package, a source
 revision, a valid wheel whose shipped sources match the installed package, and
