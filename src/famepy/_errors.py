@@ -12,7 +12,9 @@ HSUCC = 0
 HFIN = 3
 HBMODE = 5
 HNOOBJ = 13
+HBOBJT = 16
 HTRUNC = 18
+HNRESW = 25
 HBOPT = 67
 HFMENV = 97
 HLICFL = 98
@@ -23,7 +25,9 @@ _MESSAGES = {
     HBMODE: "Bad or unauthorized database access mode, or the database is not open "
     "for the requested access.",
     HNOOBJ: "Object does not exist.",
+    HBOBJT: "Bad object type.",
     HTRUNC: "Data or text was truncated.",
+    HNRESW: "Illegal object name or reserved word.",
     HBOPT: "Bad option.",
     HFMENV: "The FAME environment variable is not set to the installation.",
     HLICFL: "The FAME licensing file was not found.",

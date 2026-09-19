@@ -432,6 +432,11 @@ def _attempts(path, mode):
             lambda: bridge.write_workspace_report(path, {"x": 1.0}, mode=mode, observed=999),
         ),
         ("report_mode", lambda: bridge.write_workspace_report(path, {"x": 1.0}, mode="rewrite")),
+        ("case_date_value", lambda: bridge.write_value(path, "x", MIT(Unit(), 1), mode=mode)),
+        (
+            "case_date_workspace",
+            lambda: bridge.write_workspace(path, {"x": MIT(Unit(), 1)}, mode=mode),
+        ),
     ]
 
 

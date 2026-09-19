@@ -31,7 +31,6 @@ def test_scalar_kinds_round_trip(db):
         "bf": (np.bool_(False), "boolean", False),
         "d": (qq(2021, 3), "date", qq(2021, 3)),
         "dd": (daily("2020-02-29"), "date", daily("2020-02-29")),
-        "dc": (MIT(Unit(), 4), "date", MIT(Unit(), 4)),
         "s": ("hello", "string", "hello"),
         "sb": (b"bytes", "string", "bytes"),
         "t": (Text("{not,a,list}"), "string", "{not,a,list}"),
@@ -49,8 +48,128 @@ def test_scalar_kinds_round_trip(db):
         assert type(back) is type(expected), name
         assert bridge.read_scalar(db, name) == expected
     assert famepy.quick_info(db, "d").date_frequency == 162
-    assert famepy.quick_info(db, "dc").date_frequency == FREQUENCY_CASE
     assert famepy.read_object(db, "nl").value == b"{A,B}"
+
+
+# -- the case frequency indexes series but is never a date value ---------------
+
+
+def _case_value_attempts(target, **options):
+    case = MIT(Unit(), 4)
+    return {
+        "scalar": lambda: bridge.write_value(target, "cd", case, **options),
+        "write_scalar": lambda: bridge.write_scalar(target, "cd", case, **options),
+        "series": lambda: bridge.write_value(
+            target, "cd", DateSeries(daily("2020-02-28"), [case, MIT(Unit(), -3)]), **options
+        ),
+        "series_with_missing": lambda: bridge.write_value(
+            target, "cd", DateSeries(mm(2020, 1), [None, case]), **options
+        ),
+        "empty_series": lambda: bridge.write_value(
+            target, "cd", DateSeries(qq(2020, 1), (), Unit()), empty="reference", **options
+        ),
+        "all_missing_series": lambda: bridge.write_value(
+            target, "cd", DateSeries(qq(2020, 1), [None, None], Unit()), **options
+        ),
+        "workspace": lambda: bridge.write_workspace(target, {"cd": case}, **options),
+        "tseries_helper": lambda: bridge.write_tseries(
+            target, "cd", DateSeries(qq(2020, 1), [case]), **options
+        ),
+    }
+
+
+def test_case_moments_are_refused_as_date_values_before_any_native_call(db):
+    fake = db.session._native.fake
+    bridge.write_value(db, "kept", 1.0)
+    fake.calls.clear()
+    for label, attempt in _case_value_attempts(db).items():
+        with pytest.raises(DataValidationError, match="case frequency"):
+            attempt()
+        assert fake.calls == [], label
+    with pytest.raises(DataValidationError, match="case frequency"):
+        bridge.raw_kind(MIT(Unit(), 4))
+    with pytest.raises(DataValidationError):
+        bridge.to_fame(MIT(Unit(), 4), session=db.session)
+    with pytest.raises(DataValidationError):
+        bridge.validate_value(MIT(Unit(), 4))
+    assert fake.handles[db.key].objects.keys() == {"KEPT"}
+    # A case-indexed series of calendar dates stays valid.
+    bridge.write_value(db, "ok", DateSeries(MIT(Unit(), 1), [qq(2020, 1), None]))
+    assert bridge.read_value(db, "ok") == DateSeries(MIT(Unit(), 1), [qq(2020, 1), None])
+    assert famepy.quick_info(db, "ok").frequency == FREQUENCY_CASE
+    assert famepy.quick_info(db, "ok").date_frequency == 162
+
+
+@pytest.mark.parametrize("mode", ["overwrite", "update", "create"])
+def test_case_moment_path_writes_leave_the_destination_untouched(session, tmp_path, mode):
+    path = tmp_path / "kept.db"
+    bridge.write_value(path, "kept", 42.0, mode="create")
+    before = path.read_bytes()
+    fake = session._native.fake
+    for label, attempt in _case_value_attempts(path, mode=mode).items():
+        fake.calls.clear()
+        with pytest.raises(DataValidationError, match="case frequency"):
+            attempt()
+        assert fake.calls == [] and path.read_bytes() == before, label
+    fake.calls.clear()
+    report = bridge.write_workspace_report(path, {"cd": MIT(Unit(), 4)}, mode=mode)
+    assert report.written == () and not report.posted
+    assert [f.error_type for f in report.failures] == ["DataValidationError"]
+    assert fake.calls == [] and path.read_bytes() == before
+    assert bridge.read_value(path, "kept") == 42.0
+
+
+def test_date_series_carrier_refuses_the_case_value_frequency():
+    case = MIT(Unit(), 4)
+    with pytest.raises(DataValidationError, match="case frequency"):
+        DateSeries(qq(2020, 1), [case])
+    with pytest.raises(DataValidationError, match="case frequency"):
+        DateSeries(qq(2020, 1), [None, case, None])
+    with pytest.raises(DataValidationError, match="case frequency"):
+        DateSeries(qq(2020, 1), (), Unit())
+    with pytest.raises(DataValidationError, match="case frequency"):
+        DateSeries(qq(2020, 1), [None], value_frequency=Unit())
+    # Mixed frequencies are still the first error when a calendar value precedes.
+    with pytest.raises(DataValidationError):
+        DateSeries(qq(2020, 1), [qq(2020, 1), case])
+
+
+def test_raw_layer_refuses_the_case_frequency_as_a_date_type(db):
+    fake = db.session._native.fake
+    fake.calls.clear()
+    with pytest.raises(DataValidationError, match="case frequency"):
+        famepy.scalar("date", 4, date_frequency="case")
+    with pytest.raises(DataValidationError, match="case frequency"):
+        famepy.scalar("date", 4, date_frequency=FREQUENCY_CASE)
+    with pytest.raises(DataValidationError, match="case frequency"):
+        famepy.series("date", "monthly", 5, np.array([4], dtype=np.int64), date_frequency="case")
+    with pytest.raises(DataValidationError, match="case frequency"):
+        famepy.RawSeries("date", FREQUENCY_MONTHLY, 5, np.empty(0, dtype=np.int64), FREQUENCY_CASE)
+    with pytest.raises(ValueError, match="case frequency"):
+        famepy._constants.type_code("case")
+    with pytest.raises(ValueError, match="case frequency"):
+        famepy._constants.type_code(FREQUENCY_CASE)
+    assert famepy._constants.type_code("monthly") == FREQUENCY_MONTHLY
+    assert not famepy._constants.is_date_type(FREQUENCY_CASE)
+    assert famepy._constants.is_date_type(FREQUENCY_MONTHLY)
+    assert fake.calls == []
+    # A case-indexed raw date series with a calendar value type is valid.
+    raw = famepy.series(
+        "date", "case", 1, np.array([5, 6], dtype=np.int64), date_frequency="monthly"
+    )
+    famepy.write_object(db, "cdates", raw)
+    assert famepy.read_object(db, "cdates").frequency == FREQUENCY_CASE
+
+
+def test_fake_models_the_library_type_boundary_for_the_case_type(db):
+    """The independent model refuses type 232 with the library's status, not another error."""
+    from famepy._errors import HBOBJT, FameError
+
+    fake = db.session._native.fake
+    with db.operation("new object") as native, pytest.raises(FameError) as info:
+        native.new_object(db.key, b"CASE_TYPED", 1, 9, FREQUENCY_CASE, 1, 0)
+    assert info.value.status == HBOBJT == 16
+    assert "CASE_TYPED" not in fake.handles[db.key].objects
 
 
 def test_integer_scalars_are_exact_precision_not_float32(db):

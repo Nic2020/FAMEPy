@@ -463,3 +463,23 @@ def test_shim_really_rewrites_in_out_text(library, native):
     assert status.value == 0
     assert option.value == b"ITEM CLASS" and value.value == b"ON"
     native.finalize()
+
+
+def test_shim_models_the_reserved_name_and_case_type_boundaries(db):
+    """Reserved words and the case type are refused by the independent library model.
+
+    The statuses are the library's documented ones (25 and 16), not an
+    arbitrary refusal, so a fixture that uses such a name or type cannot
+    pass here and fail natively again.
+    """
+    from famepy._constants import FREQUENCY_CASE
+    from famepy._errors import HBOBJT, HNRESW
+
+    with pytest.raises(FameError) as info:
+        famepy.write_object(db, "namelist", famepy.scalar("namelist", b"{A}"))
+    assert info.value.status == HNRESW == 25
+    with db.operation("new object") as native, pytest.raises(FameError) as info:
+        native.new_object(db.key, b"CASE_TYPED", 1, 9, FREQUENCY_CASE, 1, 0)
+    assert info.value.status == HBOBJT == 16
+    famepy.write_object(db, "k_namelist", famepy.scalar("namelist", b"{A}"))
+    assert [i.name_text for i in famepy.list_objects(db)] == ["K_NAMELIST"]

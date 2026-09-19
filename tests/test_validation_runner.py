@@ -439,7 +439,8 @@ def test_verification_compares_metadata_and_bits():
     session = famepy.Session(native=fake).initialize()
     database = famepy.open_database("mem", "create", session=session)
     famepy.write_object(database, "x", famepy.scalar("precision", 1.0))
-    famepy.write_object(database, "nc", famepy.scalar("precision", SENTINELS.precision_nc))
+    # "nc" itself is a name the library (and the model) reserves.
+    famepy.write_object(database, "ncs", famepy.scalar("precision", SENTINELS.precision_nc))
     database.post()
     database.close()
     recorder = _report.Recorder()
@@ -456,14 +457,14 @@ def test_verification_compares_metadata_and_bits():
                 first_index=123,
             ),
             _groups.manifest_object(
-                "nc", "precision", [SENTINELS.precision_na], class_name="scalar", type_code=5
+                "ncs", "precision", [SENTINELS.precision_na], class_name="scalar", type_code=5
             ),
         ],
     }
     _groups.run_verify(session, manifest, recorder)
     statuses = {case.id: case.status for case in recorder.cases}
     assert statuses["reopen:x"] == "pass" and statuses["meta:x"] == "fail"
-    assert statuses["meta:nc"] == "pass" and statuses["values:nc"] == "fail"
+    assert statuses["meta:ncs"] == "pass" and statuses["values:ncs"] == "fail"
     session.finalize()
     assert _report._equal(SENTINELS.precision_nc, SENTINELS.precision_na) is False
     assert _report._equal(np.float32(1.0), 1.0) is False

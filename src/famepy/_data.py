@@ -146,10 +146,20 @@ def _encode_scalar(kind: str, value: Any) -> np.ndarray:
 
 
 def _date_frequency(value: Any) -> int:
+    """The value frequency of a date object: a defined calendar frequency.
+
+    The case frequency indexes series but cannot type a date value (the
+    library refuses it when creating the object), so it is refused here,
+    before any native call, rather than remapped to a calendar or a number.
+    """
     try:
         code = frequency_code(value)
     except (TypeError, ValueError):
         raise DataValidationError("A date value needs a supported frequency code.") from None
+    if code == FREQUENCY_CASE:
+        raise DataValidationError(
+            "The case frequency is an index frequency, not a date value type."
+        )
     if not is_date_type(code):
         raise DataValidationError("A date value needs a defined frequency.")
     return code

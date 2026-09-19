@@ -218,22 +218,34 @@ def frequency_name(code: int) -> str:
 
 
 def type_code(value: object) -> int:
-    """Return a value-type code. Date-valued objects use a frequency code."""
+    """Return a value-type code. Date-valued objects use a calendar frequency code.
+
+    The case frequency indexes series but is not a value type: the library
+    refuses it as an object type, so it is refused here before any call.
+    """
     if isinstance(value, ObjectType):
         return int(value)
     if isinstance(value, str):
         key = value.strip().lower()
         if key in {member.name.lower() for member in ObjectType}:
             return int(ObjectType[key.upper()])
-        return frequency_code(value)
-    code = _lookup(value, {**{m.name.lower(): int(m) for m in ObjectType}, **FREQUENCIES}, "type")
+        code = frequency_code(value)
+    else:
+        code = _lookup(
+            value, {**{m.name.lower(): int(m) for m in ObjectType}, **FREQUENCIES}, "type"
+        )
+    if code == FREQUENCY_CASE:
+        raise ValueError("The case frequency is an index frequency, not a date value type.")
     return code
 
 
 def is_date_type(code: int) -> bool:
-    """True when a type code denotes a frequency (date-valued data)."""
+    """True when a type code denotes a calendar frequency (date-valued data).
+
+    The case frequency is an index frequency only and never a value type.
+    """
     code = operator.index(code)
-    return code >= 8 and code in FREQUENCY_NAMES
+    return code >= 8 and code != FREQUENCY_CASE and code in FREQUENCY_NAMES
 
 
 def type_name(code: int) -> str:

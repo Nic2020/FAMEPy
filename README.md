@@ -8,10 +8,12 @@ The behavioral reference is
 **Status: pre-alpha. The operational core (runtime lifecycle, local
 databases, raw object I/O, listing, commands and the monthly precision
 bridge) passed the consolidated validation campaign on one Windows and one
-Linux host with an installed FAME. The full TimeSeriesEconPy bridge added in
-this revision (every reference frequency anchor, every value kind, workspace
-reads and writes) is implemented and tested offline against an in-memory
-fake backend and an independent C shim and awaits its native run
+Linux host with an installed FAME. The full TimeSeriesEconPy bridge (every
+reference frequency anchor, every value kind, workspace reads and writes) is
+implemented and tested offline against an in-memory fake backend and an
+independent C shim; its first native run passed the workspace group and the
+calendar checks and failed on two invalid fixtures, corrected in this
+revision, so it awaits a new native run
 (see [capability status](docs/capabilities.md)).**
 
 Implemented: runtime lifecycle, databases (the five local access modes, work

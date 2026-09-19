@@ -12,6 +12,13 @@ Calendar cases assert structural facts of the library's own index space
 boundaries, period counts per year) rather than an assumed epoch. Every
 frequency anchor of the reference is exercised once; date-value/index
 frequency combinations are covered by a small representative set.
+
+Every fixture object is written with per-object containment (the report
+variant of the workspace write) and read as its own case: the primary
+failure of one object is recorded on its ``write:<name>`` case, only the
+cases that depend on that object are blocked, and every other object is
+still verified. The strict batch behavior of ``write_workspace`` is
+exercised by the workspace group and the unit tests, never weakened here.
 """
 
 from __future__ import annotations
@@ -23,10 +30,11 @@ import numpy as np
 
 import famepy
 from famepy import bridge
-from famepy._constants import FREQUENCIES, FREQUENCY_NAMES
+from famepy._constants import FREQUENCIES, FREQUENCY_CASE, FREQUENCY_NAMES
 from famepy._data import classify_by_sentinel
 
 from ._manifest import _read, manifest_object, verify_case_ids
+from ._report import Case
 
 if TYPE_CHECKING:
     from ._groups import Context
@@ -102,17 +110,88 @@ def date_value_combinations() -> list[tuple[str, Any]]:
     weekly_of_annual = bridge.DateSeries(
         ts.weekly("2020-02-28", 5), [ts.MIT.from_yp(ts.Yearly(6), 2020, 1)]
     )
+    # A case-indexed series of calendar dates is valid; calendar-indexed
+    # series of case moments are not (the case frequency is never a value
+    # type), so the negative cases below cover that side.
     case_of_monthly = bridge.DateSeries(ts.MIT(ts.Unit(), 1), [ts.mm(2020, 1), ts.mm(2020, 2)])
-    business_of_case = bridge.DateSeries(
-        ts.bdaily("2020-02-28"), [ts.MIT(ts.Unit(), 7), ts.MIT(ts.Unit(), -3)]
+    semiannual = ts.HalfYearly(3)
+    business_of_semiannual = bridge.DateSeries(
+        ts.bdaily("2020-02-28"),
+        [
+            bridge.year_period_to_mit(semiannual, 2020, 2),
+            None,
+            bridge.year_period_to_mit(semiannual, 2021, 1),
+        ],
     )
     return [
         ("dv_monthly_of_daily", monthly_of_daily),
         ("dv_daily_of_quarterly", daily_of_quarterly),
         ("dv_weekly_of_annual", weekly_of_annual),
         ("dv_case_of_monthly", case_of_monthly),
-        ("dv_business_of_case", business_of_case),
+        ("dv_business_of_semiannual", business_of_semiannual),
     ]
+
+
+def frequency_fixture_names() -> list[str]:
+    """Every object of the frequencies fixture, in writing order."""
+    names: list[str] = []
+    for code in CALENDAR_CODES:
+        names.extend([f"f_{_label(code)}", f"d_{_label(code)}"])
+    names.extend(name for name, _ in date_value_combinations())
+    return names
+
+
+# -- per-object containment ------------------------------------------------------
+
+_NOT_WRITTEN = "object not written"
+
+
+def _reraise(error: BaseException) -> None:
+    raise error
+
+
+def contained_write(
+    r: Any,
+    case_id: str,
+    target: Any,
+    workspace: Any,
+    *,
+    case_of: Any,
+    **options: Any,
+) -> set[str]:
+    """Write every object of ``workspace`` with per-object containment.
+
+    ``case_id`` passes when the contained write ran and every object was
+    written; otherwise its record lists the failed objects. Each object gets
+    its own ``case_of(name)`` case: the primary error for a failed one, a
+    pass for a written one. The names written are returned so that the
+    caller blocks exactly the dependents of a failed object and still
+    verifies every other object.
+    """
+    reports: list[Any] = []
+
+    def write() -> list[str]:
+        report = bridge.write_workspace_report(target, workspace, **options)
+        reports.append(report)
+        return [str(failure) for failure in report.failures]
+
+    r.expect(case_id, write, [])
+    if not reports:
+        return set()
+    report = reports[0]
+    for failure in report.failures:
+        r.check(case_of(failure.name), partial(_reraise, failure.error))
+    for name in report.written:
+        r.add(Case(case_of(name), "pass"))
+    return set(report.written)
+
+
+def _block(r: Any, case_ids: list[str]) -> None:
+    """Block the listed cases that have no record yet (dependents of a failed object)."""
+    present = {case.id for case in r.cases}
+    for case_id in case_ids:
+        if case_id not in present:
+            r.blocked(case_id, _NOT_WRITTEN)
 
 
 # -- frequencies group -----------------------------------------------------------
@@ -139,19 +218,26 @@ def _frequency_case_ids() -> tuple[str, ...]:
     return tuple(ids)
 
 
+CASE_VALUE_CASES = (
+    "case_date_scalar_refused",
+    "case_date_series_refused",
+    "case_empty_date_series_refused",
+    "case_missing_date_series_refused",
+    "raw_case_date_scalar_refused",
+    "raw_case_date_series_refused",
+    "case_date_write_unchanged",
+    "library_case_type_status",
+)
+
 FREQUENCIES_REQUIRED = (
     "fixtures",
     "write_frequencies",
-    "read_frequencies",
+    *[f"write:{name}" for name in frequency_fixture_names()],
     *_frequency_case_ids(),
     "unsupported_frequency_refused",
     "case_index_passthrough",
-    *verify_case_ids(
-        "cross_process_frequencies",
-        [f"f_{_label(code)}" for code in CALENDAR_CODES]
-        + [f"d_{_label(code)}" for code in CALENDAR_CODES]
-        + [name for name, _ in date_value_combinations()],
-    ),
+    *CASE_VALUE_CASES,
+    *verify_case_ids("cross_process_frequencies", frequency_fixture_names()),
     "finalize",
 )
 
@@ -236,56 +322,56 @@ def group_frequencies(ctx: Context) -> None:
                     note=f"python convention year:period {year}:{period}",
                 )
 
-    r.check(
-        "write_frequencies",
-        lambda: bridge.write_workspace(path, workspace, mode="create"),
+    written = contained_write(
+        r, "write_frequencies", path, workspace, case_of="write:{}".format, mode="create"
     )
 
     sentinels = session.sentinels
     stored = expected_precision_values(sentinels)
 
     def read_all() -> None:
-        back = bridge.read_workspace(path)
         with famepy.open_database(path, "readonly", session=session) as database:
             for code in CALENDAR_CODES:
                 label = _label(code)
-                series = back.get(f"f_{label}")
-                expected = workspace[f"f_{label}"]
-                r.equal(
-                    f"series_round_trip:{label}",
-                    None
-                    if series is None
-                    else [
-                        int(series.firstdate),
-                        bridge.fame_frequency(series.frequency),
-                        series.values,
-                    ],
-                    [int(expected.firstdate), code, expected.values],
-                )
-                # Raw identity: the stored bits and missing categories, never
-                # the NaN the bridge reads back.
-                r.expect(
-                    f"series_raw_categories:{label}",
-                    partial(_raw_series_record, database, f"f_{label}", sentinels),
-                    [
-                        code,
-                        bridge.mit_to_index(anchor_moment(code), session=session),
-                        stored,
-                        [0, 1, 0],
-                    ],
-                )
-                r.equal(
-                    f"date_scalar_round_trip:{label}",
-                    _mit_record(back.get(f"d_{label}")),
-                    _mit_record(workspace[f"d_{label}"]),
-                )
-                r.expect(
-                    f"date_scalar_raw:{label}",
-                    partial(_raw_scalar_record, database, f"d_{label}"),
-                    [code, bridge.mit_to_index(anchor_moment(code), session=session)],
-                )
+                first = bridge.mit_to_index(anchor_moment(code), session=session)
+                if f"f_{label}" not in written:
+                    _block(r, [f"series_round_trip:{label}", f"series_raw_categories:{label}"])
+                else:
+                    expected = workspace[f"f_{label}"]
+                    r.expect(
+                        f"series_round_trip:{label}",
+                        partial(_bridge_series_record, database, f"f_{label}"),
+                        [int(expected.firstdate), code, expected.values],
+                    )
+                    # Raw identity: the stored bits and missing categories,
+                    # never the NaN the bridge reads back.
+                    r.expect(
+                        f"series_raw_categories:{label}",
+                        partial(_raw_series_record, database, f"f_{label}", sentinels),
+                        [code, first, stored, [0, 1, 0]],
+                    )
+                if f"d_{label}" not in written:
+                    _block(r, [f"date_scalar_round_trip:{label}", f"date_scalar_raw:{label}"])
+                else:
+                    r.expect(
+                        f"date_scalar_round_trip:{label}",
+                        partial(_bridge_mit_record, database, f"d_{label}"),
+                        _mit_record(workspace[f"d_{label}"]),
+                    )
+                    r.expect(
+                        f"date_scalar_raw:{label}",
+                        partial(_raw_scalar_record, database, f"d_{label}"),
+                        [code, first],
+                    )
             for name, value in date_value_combinations():
-                r.equal(f"date_values:{name}", _dates_record(back.get(name)), _dates_record(value))
+                if name not in written:
+                    _block(r, [f"date_values:{name}", f"date_values_raw:{name}"])
+                    continue
+                r.expect(
+                    f"date_values:{name}",
+                    partial(_bridge_dates_record, database, name),
+                    _dates_record(value),
+                )
                 r.expect(
                     f"date_values_raw:{name}",
                     partial(_raw_series_record, database, name, sentinels),
@@ -297,7 +383,10 @@ def group_frequencies(ctx: Context) -> None:
                     ],
                 )
 
-    r.check("read_frequencies", read_all)
+    if written:
+        read_all()
+    else:
+        _block(r, list(_frequency_case_ids()))
 
     def unsupported() -> None:
         with famepy.open_database(path, "update", session=session) as database:
@@ -317,42 +406,148 @@ def group_frequencies(ctx: Context) -> None:
         ],
         [1, 0, -5, 2**40],
     )
+    case_value_cases(ctx, path)
     # Cross-process manifests come from the fixtures and the verified calendar
-    # conversion, never from what was read back.
+    # conversion, never from what was read back; only written objects are
+    # verified, the others are blocked here so that nothing is silently
+    # omitted from the required list.
     objects = []
     for code in CALENDAR_CODES:
         label = _label(code)
         first = bridge.mit_to_index(anchor_moment(code), session=session)
-        objects.append(
-            manifest_object(
-                f"f_{label}",
-                "precision",
-                stored,
-                class_name="series",
-                type_code=int(famepy.ObjectType.PRECISION),
-                frequency=code,
-                first_index=first,
+        if f"f_{label}" in written:
+            objects.append(
+                manifest_object(
+                    f"f_{label}",
+                    "precision",
+                    stored,
+                    class_name="series",
+                    type_code=int(famepy.ObjectType.PRECISION),
+                    frequency=code,
+                    first_index=first,
+                )
             )
-        )
-        objects.append(
-            manifest_object(f"d_{label}", "date", [first], class_name="scalar", type_code=code)
-        )
+        if f"d_{label}" in written:
+            objects.append(
+                manifest_object(f"d_{label}", "date", [first], class_name="scalar", type_code=code)
+            )
     for name, value in date_value_combinations():
-        objects.append(
-            manifest_object(
-                name,
-                "date",
-                expected_date_indices(value, session),
-                class_name="series",
-                type_code=bridge.fame_frequency(value.value_frequency),
-                frequency=bridge.fame_frequency(value.frequency),
-                first_index=bridge.mit_to_index(value.firstdate, session=session),
+        if name in written:
+            objects.append(
+                manifest_object(
+                    name,
+                    "date",
+                    expected_date_indices(value, session),
+                    class_name="series",
+                    type_code=bridge.fame_frequency(value.value_frequency),
+                    frequency=bridge.fame_frequency(value.frequency),
+                    first_index=bridge.mit_to_index(value.firstdate, session=session),
+                )
             )
-        )
+    unwritten = [name for name in frequency_fixture_names() if name not in written]
+    _block(r, list(verify_case_ids("cross_process_frequencies", unwritten)))
     ctx.verify_in_new_process(
         "cross_process_frequencies", {"database": str(path), "objects": objects}
     )
     r.check("finalize", session.finalize)
+
+
+def case_value_cases(ctx: Context, path: Any) -> None:
+    """The case frequency is an index, never a date value: refused before any call.
+
+    The library accepts case-indexed series but not an object typed by the
+    case frequency; the bridge and the raw layer refuse such values ahead of
+    any native call, the destination stays untouched, and the library's own
+    status for the forbidden type is asserted at the native layer.
+    """
+    ts = _tsecon()
+    session, r = ctx.session, ctx.recorder
+    case_moment = ts.MIT(ts.Unit(), 5)
+    refused = (famepy.DataValidationError,)
+    r.expect_error(
+        "case_date_scalar_refused",
+        lambda: bridge.write_value(path, "case_date", case_moment, mode="update"),
+        refused,
+    )
+    r.expect_error(
+        "case_date_series_refused",
+        lambda: bridge.DateSeries(ts.bdaily("2020-02-28"), [case_moment, None]),
+        refused,
+    )
+    r.expect_error(
+        "case_empty_date_series_refused",
+        lambda: bridge.DateSeries(ts.qq(2020, 1), (), ts.Unit()),
+        refused,
+    )
+    r.expect_error(
+        "case_missing_date_series_refused",
+        lambda: bridge.DateSeries(ts.qq(2020, 1), [None, None], ts.Unit()),
+        refused,
+    )
+    r.expect_error(
+        "raw_case_date_scalar_refused",
+        lambda: famepy.scalar("date", 5, date_frequency="case"),
+        refused,
+    )
+    r.expect_error(
+        "raw_case_date_series_refused",
+        lambda: famepy.series(
+            "date", "monthly", ctx.first, np.array([5], dtype=np.int64), date_frequency="case"
+        ),
+        refused,
+    )
+
+    def unchanged() -> Any:
+        names_before = sorted(_upper_names(path, session))
+        bytes_before = path.read_bytes()
+        outcomes: list[str] = []
+        invalid = ts.Workspace(case_date=case_moment)
+        for attempt in (
+            lambda: bridge.write_value(path, "case_date", case_moment, mode="update"),
+            lambda: bridge.write_scalar(path, "case_date", case_moment, mode="update"),
+            lambda: bridge.write_workspace(path, invalid, mode="update"),
+        ):
+            try:
+                attempt()
+                outcomes.append("no error")
+            except famepy.DataValidationError:
+                outcomes.append("refused")
+        report = bridge.write_workspace_report(path, invalid, mode="update")
+        return [
+            outcomes,
+            list(report.written),
+            report.posted,
+            [failure.error_type for failure in report.failures],
+            sorted(_upper_names(path, session)) == names_before,
+            path.read_bytes() == bytes_before,
+        ]
+
+    r.expect(
+        "case_date_write_unchanged",
+        unchanged,
+        [["refused"] * 3, [], False, ["DataValidationError"], True, True],
+    )
+
+    def library_status() -> int:
+        """The library's status for an object typed by the case frequency."""
+        with famepy.open_database(path, "update", session=session) as database:
+            with database.operation("new object") as native:
+                try:
+                    native.new_object(
+                        database.key,
+                        b"CASE_TYPED",
+                        int(famepy.ObjectClass.SERIES),
+                        FREQUENCIES["business"],
+                        FREQUENCY_CASE,
+                        int(famepy.Basis.DAILY),
+                        int(famepy.Observed.UNDEFINED),
+                    )
+                except famepy.FameError as error:
+                    return error.status
+                native.delete_object(database.key, b"CASE_TYPED")
+            return 0
+
+    r.expect("library_case_type_status", library_status, 16)
 
 
 def _raw_series_record(database: Any, name: str, sentinels: Any) -> Any:
@@ -368,6 +563,19 @@ def _raw_series_tail(database: Any, name: str, sentinels: Any) -> Any:
 def _raw_scalar_record(database: Any, name: str) -> Any:
     raw = _read(database, name)
     return [raw.type_code, int(raw.value)]
+
+
+def _bridge_series_record(database: Any, name: str) -> Any:
+    series = bridge.read_value(database, name)
+    return [int(series.firstdate), bridge.fame_frequency(series.frequency), series.values]
+
+
+def _bridge_mit_record(database: Any, name: str) -> Any:
+    return _mit_record(bridge.read_value(database, name))
+
+
+def _bridge_dates_record(database: Any, name: str) -> Any:
+    return _dates_record(bridge.read_value(database, name))
 
 
 def _mit_record(value: Any) -> Any:
@@ -389,26 +597,30 @@ def _dates_record(value: Any) -> Any:
 
 # -- bridge value cases (run inside the bridge group) ---------------------------
 
+KIND_NAMES = (
+    "numeric_scalar",
+    "integer_scalar",
+    "boolean_scalar",
+    "date_scalar",
+    "string_scalar",
+    "literal_brace_string",
+    "namelist",
+    "string_vector",
+    "numeric_series",
+    "boolean_series",
+    "date_series",
+    "string_series",
+)
+# The kind objects are written under the ``k`` prefix (``K_NAMELIST``, ...)
+# because a bare kind label can be a name the library reserves; the case
+# labels keep the kind names.
+KIND_PREFIX = "k"
+
 BRIDGE_VALUE_CASES = (
     "write_kinds",
-    "read_kinds",
-    *[
-        f"kind:{name}"
-        for name in (
-            "numeric_scalar",
-            "integer_scalar",
-            "boolean_scalar",
-            "date_scalar",
-            "string_scalar",
-            "literal_brace_string",
-            "namelist",
-            "string_vector",
-            "numeric_series",
-            "boolean_series",
-            "date_series",
-            "string_series",
-        )
-    ],
+    *[f"write_kind:{name}" for name in KIND_NAMES],
+    *[f"kind:{name}" for name in KIND_NAMES],
+    "library_reserved_name_status",
     "write_missing_matrix",
     *[
         f"{prefix}:{kind}:{category}"
@@ -490,14 +702,51 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
             ]
         return value
 
-    r.check("write_kinds", lambda: bridge.write_workspace(path, kinds, mode="update"))
+    glue = "_"
+    written = contained_write(
+        r,
+        "write_kinds",
+        path,
+        kinds,
+        case_of=lambda name: f"write_kind:{name[len(KIND_PREFIX) + len(glue) :]}",
+        mode="update",
+        prefix=KIND_PREFIX,
+        glue=glue,
+    )
 
-    def read_kinds() -> None:
-        back = bridge.read_workspace(path, *kinds.keys())
-        for name in kinds:
-            r.equal(f"kind:{name}", record(name, back.get(name)), expected[name])
+    def object_name(name: str) -> str:
+        return f"{KIND_PREFIX}{glue}{name}"
 
-    r.check("read_kinds", read_kinds)
+    def read_kind(name: str) -> Any:
+        with famepy.open_database(path, "readonly", session=session) as database:
+            return record(name, bridge.read_value(database, object_name(name)))
+
+    for name in kinds:
+        if object_name(name) in written:
+            r.expect(f"kind:{name}", partial(read_kind, name), expected[name])
+        else:
+            r.blocked(f"kind:{name}", _NOT_WRITTEN)
+
+    def reserved_status() -> int:
+        """The library's status for a reserved word used as an object name."""
+        with famepy.open_database(path, "update", session=session) as database:
+            with database.operation("new object") as native:
+                try:
+                    native.new_object(
+                        database.key,
+                        b"NAMELIST",
+                        int(famepy.ObjectClass.SCALAR),
+                        0,
+                        int(famepy.ObjectType.NAMELIST),
+                        int(famepy.Basis.DAILY),
+                        int(famepy.Observed.UNDEFINED),
+                    )
+                except famepy.FameError as error:
+                    return error.status
+                native.delete_object(database.key, b"NAMELIST")
+            return 0
+
+    r.expect("library_reserved_name_status", reserved_status, 25)
 
     # Missing categories per kind, written raw and read through the bridge.
     first = ctx.first
@@ -538,11 +787,14 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
             )
         # The numeric kind written through the bridge stores NC bits, not NaN.
         numeric_expected = np.array([1.5, s.numeric_nc, -2.0], dtype=np.float32)
-        r.expect(
-            "kinds_raw_nan_as_nc",
-            lambda: _raw_series_record(database, "numeric_series", s)[2:],
-            [numeric_expected, [0, 1, 0]],
-        )
+        if object_name("numeric_series") in written:
+            r.expect(
+                "kinds_raw_nan_as_nc",
+                lambda: _raw_series_record(database, object_name("numeric_series"), s)[2:],
+                [numeric_expected, [0, 1, 0]],
+            )
+        else:
+            r.blocked("kinds_raw_nan_as_nc", _NOT_WRITTEN)
     for kind in ("precision", "numeric", "boolean", "date", "string"):
         for category in _CATEGORY:
             name = f"m_{kind}_{category}"

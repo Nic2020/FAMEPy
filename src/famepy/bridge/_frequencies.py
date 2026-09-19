@@ -7,13 +7,16 @@ Two notions of time are kept apart: the *index frequency* of a series (the
 frequency of its observations' positions) and the *value frequency* of a
 date-valued observation. Both use the same maps.
 
-Supported index and value frequencies: ``Unit`` (case), ``Daily``,
-``BDaily`` (business), the seven weekly endings, ``Monthly``, the three
-quarterly anchors, the six half-yearly anchors and the twelve annual anchors.
-Every other frequency in the library's table (ten-day, biweekly, twice
-monthly, bimonthly, year-per-period, period-per-year, intraday and
-user-defined weekly patterns) is refused with ``UnsupportedFrequencyError``;
-nothing is remapped to an ordinary calendar.
+Supported index frequencies: ``Unit`` (case), ``Daily``, ``BDaily``
+(business), the seven weekly endings, ``Monthly``, the three quarterly
+anchors, the six half-yearly anchors and the twelve annual anchors. The
+supported value frequencies are the same set without ``Unit``: the library
+indexes series by case but does not type date values by it, so a case moment
+is refused as a date value (see ``_values``). Every other frequency in the
+library's table (ten-day, biweekly, twice monthly, bimonthly,
+year-per-period, period-per-year, intraday and user-defined weekly patterns)
+is refused with ``UnsupportedFrequencyError``; nothing is remapped to an
+ordinary calendar.
 
 Indices are converted through the library's own year/period functions. The
 year/period *conventions* (which year and period number a moment carries)

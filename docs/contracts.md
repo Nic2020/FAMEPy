@@ -156,10 +156,15 @@ classified from their bits, never through a double. A Python float written as
 encoding.
 
 Every Python-side check happens before the first native call: name, kind,
-frequency, attributes, value encoding (a Boolean code must fit int32, a date
+frequency (a date value frequency must be a calendar frequency, never
+case), attributes, value encoding (a Boolean code must fit int32, a date
 index int64, a float must be encodable, strings and namelists are NUL-free
 bytes) and buffers (dtype, byte order, contiguity, length and 64-bit range
-arithmetic). Buffers are validated again immediately before the write, so a
+arithmetic). Object names are checked for their byte capacity only; whether
+a name is legal (the library reserves a number of words, such as the names
+of its data types and missing-value codes, and date-like names) is the
+library's decision, reported as `FameError` with status 25 by the object
+creation and never guessed by a shipped word list. Buffers are validated again immediately before the write, so a
 buffer or list mutated after construction is refused rather than passed on.
 An invalid input therefore makes no mutating native call and leaves existing
 objects and files unchanged. The caller's buffer is never converted or
@@ -225,7 +230,7 @@ uses TimeSeriesEconPy's public API only.
 | `numpy.float32` | numeric scalar | `numpy.float32` |
 | `int` (exactly representable in float64) | precision scalar | `float` |
 | `bool`, `numpy.bool_` | Boolean scalar | `bool` |
-| `MIT` | date scalar with the moment's frequency | `MIT` |
+| `MIT` of a calendar frequency | date scalar with the moment's frequency | `MIT` |
 | `str` not shaped `{...}` | string scalar | `str` |
 | `str` shaped `{...}` | namelist (the reference's detection) | `NameList` |
 | `bridge.Text("{literal}")` | string scalar, always | `str` |
@@ -235,7 +240,7 @@ uses TimeSeriesEconPy's public API only.
 | `TSeries` float64 or exact integers | precision series | `TSeries` float64 |
 | `TSeries` float32 | numeric series | `TSeries` float32 |
 | `TSeries` bool | Boolean series | `TSeries` bool |
-| `bridge.DateSeries` | date series | `DateSeries` |
+| `bridge.DateSeries` (calendar value frequency) | date series | `DateSeries` |
 | `bridge.StringSeries` | string series | `StringSeries` |
 | `Workspace`, mapping, `MVTSeries` | one object per flattened name | separate members (no reconstruction) |
 
@@ -259,13 +264,27 @@ Deliberate differences from the reference, each covered by tests:
   reads duplicates twice.
 - `write_workspace` with a path requires an explicit `mode`; the reference
   defaults to overwrite.
+- A case moment (`MIT` of `Unit`) is refused as a date *value* with
+  `DataValidationError`: as a scalar, as a `DateSeries` observation and as
+  the `value_frequency` of an empty or all-missing `DateSeries`. The
+  library indexes series by the case frequency but does not accept it as
+  an object type, so such an object cannot be created; the reference maps
+  the frequency anyway and leaves the refusal to the library. Nothing is
+  remapped to a calendar or to a number in its place (write numeric data
+  for case numbers explicitly). Case-indexed series of calendar dates, case
+  string series and the case-index conversions are unaffected.
 
 ### Frequencies
 
-Supported index and value frequencies: `Unit` (case), `Daily`, `BDaily`
-(business, Monday to Friday), `Weekly(end_day)` for all seven endings,
-`Monthly`, `Quarterly(1..3)` (library anchors october/november/december),
+Supported index frequencies: `Unit` (case), `Daily`, `BDaily` (business,
+Monday to Friday), `Weekly(end_day)` for all seven endings, `Monthly`,
+`Quarterly(1..3)` (library anchors october/november/december),
 `HalfYearly(1..6)` (july..december) and `Yearly(1..12)` (january..december).
+Supported date *value* frequencies are the same set without `Unit`: the
+case frequency is never a value type (see the differences above), and the
+raw layer refuses it in the same way (`famepy.scalar`/`famepy.series` with
+`date_frequency="case"`, `RawScalar`/`RawSeries`, `type_code("case")`),
+before any native call.
 The library names quarterly and half-yearly frequencies by one of their
 equivalent ending months; the maps are the reference's. Ten-day, biweekly,
 twice-monthly, bimonthly, ypp, ppy, intraday, weekly-pattern and undefined

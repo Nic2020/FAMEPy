@@ -271,8 +271,8 @@ def test_numeric_scalars_preserve_float32_bits(db):
     assert int(read_object(db, "ns").values.view(np.uint32)[0]) == 0x7F800101
     assert famepy.missing_type(db, "numeric", raw.value) == 0
     sentinel = db.session.sentinels.numeric_nc
-    write_object(db, "nc", RawScalar("numeric", sentinel))
-    back = read_object(db, "nc").value
+    write_object(db, "ncs", RawScalar("numeric", sentinel))  # "nc" is a reserved name
+    back = read_object(db, "ncs").value
     assert famepy.missing_type(db, "numeric", back) == 1
     assert classify_by_sentinel(np.array([back]), "numeric", db.session.sentinels).tolist() == [1]
 

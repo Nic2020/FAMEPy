@@ -11,7 +11,7 @@ Representation table (Python value -> FAME object -> Python value):
 | ``numpy.float32``                  | numeric scalar                | ``numpy.float32``    |
 | ``int`` (exactly representable)    | precision scalar              | ``float``            |
 | ``bool`` / ``numpy.bool_``         | Boolean scalar                | ``bool``             |
-| ``MIT``                            | date scalar (value frequency) | ``MIT``              |
+| ``MIT`` (calendar frequency)       | date scalar (value frequency) | ``MIT``              |
 | ``str`` not shaped ``{...}``       | string scalar                 | ``str``              |
 | ``str`` shaped ``{...}``           | namelist (reference detection)| ``NameList``         |
 | ``Text``                           | string scalar, always         | ``str``              |
@@ -31,7 +31,12 @@ matches, so it stores a plain NaN); a namelist reads back as a ``NameList``
 of ordered members instead of the library's list text; string series keep
 their first date in a ``StringSeries`` instead of becoming a bare vector; a
 missing Boolean observation is never read as ``True``; a missing date is
-never a plausible integer. Every difference is covered by the tests.
+never a plausible integer; a case moment (``MIT`` of ``Unit``) is refused as
+a date *value* (scalar, ``DateSeries`` observation or the value frequency of
+an empty or all-missing ``DateSeries``) because the library accepts the case
+frequency as a series index but not as an object type, and nothing is
+remapped to a calendar or a number in its place (the reference maps it and
+lets the library refuse the object). Every difference is covered by the tests.
 
 Missing policies: ``missing="nan"`` (default) reads NC, NA and ND as NaN
 for floating kinds and as ``None`` for date and string values, which is
@@ -190,13 +195,29 @@ def _check_firstdate(firstdate: Any) -> MIT:
     return firstdate
 
 
+def _check_value_frequency(frequency: Frequency) -> int:
+    """The library code of a date *value* frequency: a supported calendar one.
+
+    The case frequency indexes series but cannot type a date value; refusing
+    it here keeps the refusal deterministic and ahead of any native call.
+    """
+    code = fame_frequency(frequency)
+    if isinstance(frequency, Unit):
+        raise DataValidationError(
+            "A date value cannot carry the case frequency; it indexes series only."
+        )
+    return code
+
+
 @dataclass(frozen=True)
 class DateSeries:
     """A series of date-valued observations: ``MIT`` values or ``None`` (missing).
 
-    ``firstdate`` gives the index frequency; ``value_frequency`` the frequency
-    of the observations, inferred from the values when any is present and
-    required otherwise. Every value must carry that frequency.
+    ``firstdate`` gives the index frequency (any supported frequency,
+    including case); ``value_frequency`` the frequency of the observations,
+    inferred from the values when any is present and required otherwise.
+    Every value must carry that frequency, which must be a calendar
+    frequency: the case frequency is refused as a value frequency.
     """
 
     firstdate: MIT
@@ -224,7 +245,7 @@ class DateSeries:
             raise DataValidationError("An empty DateSeries needs value_frequency.")
         if not isinstance(found, Frequency):
             raise TypeError("value_frequency must be a tsecon Frequency instance.")
-        fame_frequency(found)
+        _check_value_frequency(found)
         object.__setattr__(self, "firstdate", _check_firstdate(firstdate))
         object.__setattr__(self, "values", items)
         object.__setattr__(self, "value_frequency", found)
@@ -347,7 +368,7 @@ def _prepare(value: Any, empty: str) -> _Prepared:
     if isinstance(value, (int, float, np.integer, np.floating)):
         return _Prepared("precision", True, None, _scalar_number(value), None)
     if isinstance(value, MIT):
-        fame_frequency(value.frequency)
+        _check_value_frequency(value.frequency)
         return _Prepared("date", True, None, value, value.frequency)
     if isinstance(value, Text):
         return _Prepared("string", True, None, to_native(value.value, what="string value"), None)

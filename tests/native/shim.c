@@ -53,7 +53,9 @@
 #define HFIN 3
 #define HBMODE 5
 #define HNOOBJ 13
+#define HBOBJT 16
 #define HTRUNC 18
+#define HNRESW 25
 #define HBOPT 67
 #define HFAMER 513
 
@@ -511,6 +513,19 @@ API void cfmcldb(int32_t *status, int32_t key) {
 
 /* ---- objects ----------------------------------------------------------- */
 
+/* A small sample of names the library refuses as object names (basic data
+   type names and missing-value codes): a model of the documented refusal,
+   not the vendor's reserved-word list. Names arrive upper-cased. */
+static int reserved_name(const char *name) {
+    static const char *const sample[] = {
+        "NAMELIST", "NUMERIC", "PRECISION", "BOOLEAN", "STRING", "DATE", "CASE", "NC", "NA", "ND"
+    };
+    size_t i;
+    for (i = 0; i < sizeof sample / sizeof sample[0]; ++i)
+        if (strcmp(name, sample[i]) == 0) return 1;
+    return 0;
+}
+
 API void cfmnwob(int32_t *status, int32_t key, char *name, int32_t cls, int32_t freq,
                  int32_t type, int32_t basis, int32_t observed) {
     Handle *h;
@@ -520,7 +535,10 @@ API void cfmnwob(int32_t *status, int32_t key, char *name, int32_t cls, int32_t 
     if (!(h = handle_of(key))) { *status = S_BAD_KEY; return; }
     if (h->mode == 1) { *status = S_READONLY; return; }
     if (strlen(name) > 242) { *status = S_NAME_TOO_LONG; return; }
+    if (reserved_name(name)) { *status = HNRESW; return; }
     if (cls != 1 && cls != 2) { *status = HBOPT; return; }
+    /* The library's type boundary: the case frequency is an index, never an object type. */
+    if (type == 232) { *status = HBOBJT; return; }
     if (find_object(h, name)) { *status = S_EXISTS; return; }
     for (k = 0; k < MAX_OBJ; ++k) {
         Object *o = &h->objects[k];

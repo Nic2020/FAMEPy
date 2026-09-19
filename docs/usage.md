@@ -115,9 +115,15 @@ bridge.write_value(db, "labels", ["x", "y"])  # a case string series
 bridge.read_value(db, "when")  # -> MIT
 ```
 
-Every reference frequency anchor is supported (case, daily, business, the
-seven weekly endings, monthly, three quarterly, six half-yearly and twelve
-annual anchors); other library frequencies raise `UnsupportedFrequencyError`.
+Every reference frequency anchor is supported as an index (case, daily,
+business, the seven weekly endings, monthly, three quarterly, six half-yearly
+and twelve annual anchors); other library frequencies raise
+`UnsupportedFrequencyError`. Date *values* carry a calendar frequency: a case
+moment is refused as a date scalar or `DateSeries` observation
+(`DataValidationError`), because the library does not type objects by the
+case frequency; write numeric data for case numbers. Object names must be
+legal for the library: a reserved word (for example `NAMELIST`) is refused
+by the library with status 25.
 Values of every kind convert as listed in [contracts](contracts.md): dates
 become `MIT`, date series `bridge.DateSeries`, string series
 `bridge.StringSeries`, name-lists `bridge.NameList`.

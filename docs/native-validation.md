@@ -138,7 +138,10 @@ returned the status.
 Within `bridge`, after the monthly precision cases, every value kind of the
 reference is written through the bridge and read back (numeric, integer,
 Boolean, date, string, literal brace string, name-list, string vector,
-numeric/Boolean/date/string series), each missing category of each kind is
+numeric/Boolean/date/string series; the objects are written under a prefix
+because bare kind labels can be names the library reserves, and the
+library's status for a reserved word used as an object name, 25, is
+asserted natively), each missing category of each kind is
 written raw and read through the bridge (floating values as NaN, dates and
 strings as `None`, a missing Boolean refused, strict mode refused), and the
 reference's empty-series cases are written and read under the reference
@@ -153,13 +156,20 @@ boundary and the number of periods in 2020 (366 days, 262 business days,
 year/period reading of the last week of 2020 is recorded as an observation
 because the week-53 numbering is reference-derived. One precision series
 and one date scalar per anchor, plus representative date-value/index
-frequency combinations (including case), are written, read back through
-the bridge and, separately, as raw objects whose stored bits and missing
-categories are asserted against the fixture and the explicitly loaded NC
-sentinel, then verified across processes against manifests built from the
-fixtures and the verified calendar conversion, never from what was read
-back (a backend that stores NA in place of NC fails both); an unsupported library frequency must be refused
-by the bridge and case indices must pass through untouched. Within
+frequency combinations (including a case-indexed series of calendar
+dates), are written, read back through the bridge and, separately, as raw
+objects whose stored bits and missing categories are asserted against the
+fixture and the explicitly loaded NC sentinel, then verified across
+processes against manifests built from the fixtures and the verified
+calendar conversion, never from what was read back (a backend that stores
+NA in place of NC fails both); an unsupported library frequency must be
+refused by the bridge and case indices must pass through untouched. The
+case frequency as a date *value* is required to be refused before any
+native call (scalar, series, empty and all-missing carriers, raw scalar and
+series), the destination must be unchanged (listing and file bytes) after
+every such attempt including the contained write, and the library's own
+status for an object typed by the case frequency (16) is asserted at the
+native layer rather than inferred. Within
 `workspace`, the reference's workspace test (a scalar, a quarterly series, a
 two-column monthly multivariate series and two nesting levels) is written,
 listed, read whole (its quarterly series carries one missing observation
@@ -169,6 +179,22 @@ an absent explicit name must be refused; the report variants must contain
 an unconvertible object and a missing Boolean, and fall back to raw carriers
 on request; a contained write must report completeness and posting; and
 four objects are verified across processes.
+
+The `bridge` kind objects and every object of the `frequencies` fixture are
+written with per-object containment (the report variant of the workspace
+write) and read as separate cases: a refused or failed object is recorded
+as its own failing `write:<name>` (or `write_kind:<kind>`) case carrying the
+primary error and status, only the cases that depend on that object are
+`blocked` (`object not written`), and every other object is still written,
+read, checked raw and verified across processes. Blocked and missing cases
+never count as passes: every per-object case is in the required list. The
+strict batch behavior of `write_workspace` (first failure raises, nothing
+posted) is covered by the `workspace` group and the unit tests and is not
+weakened by this containment. The offline backends model two library
+boundaries so that an invalid fixture cannot pass offline and fail natively:
+a small sample of reserved words is refused as an object name with status 25
+(no vendor word list is shipped and no name validator is invented) and the
+case frequency is refused as an object type with status 16.
 
 Compare every row of the [per-function checklist](abi-checklist.md) with the
 installed header before the first run, record the conclusions per row in a
@@ -217,7 +243,8 @@ words, reordered or dropped namelist members, refused redirections,
 failed restorations, a lost endpoint neighbour, a calendar that reports
 every index one period late, a daily calendar without leap days, missing
 Boolean observations read as true, an object missing from wildcard
-listings, NC stored as NA outside the monthly calendar) and with adversarial child
+listings, NC stored as NA outside the monthly calendar, one bridge kind and
+one frequency anchor object refused at creation) and with adversarial child
 payloads and results; each must yield `FAIL` or `BLOCKED`, and no synthetic
 private marker may reach the final report. Backends that print forged
 results and diagnostics to the C-level streams, that apply a different

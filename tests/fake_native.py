@@ -46,10 +46,27 @@ from famepy._constants import (
     FREQUENCY_CASE,
     FREQUENCY_FAMILIES,
     FREQUENCY_MONTHLY,
+    FREQUENCY_NAMES,
 )
 from famepy._native import RangeSpec, Sentinels, WildcardEntry
 
-HSUCC, HFIN, HBMODE, HNOOBJ, HTRUNC, HBOPT, HFAMER = 0, 3, 5, 13, 18, 67, 513
+HSUCC, HFIN, HBMODE, HNOOBJ, HBOBJT, HTRUNC, HNRESW, HBOPT, HFAMER = (
+    0,
+    3,
+    5,
+    13,
+    16,
+    18,
+    25,
+    67,
+    513,
+)
+# A small sample of names the library refuses as object names (basic data
+# type names and missing-value codes): the model of the documented refusal,
+# not the vendor's reserved-word list and not an exhaustive validator.
+RESERVED_NAME_SAMPLE = frozenset(
+    {"NAMELIST", "NUMERIC", "PRECISION", "BOOLEAN", "STRING", "DATE", "CASE", "NC", "NA", "ND"}
+)
 # Documented ITEM option words the fake accepts; anything else is a bad option.
 OPTION_LABELS: dict[bytes, frozenset[bytes]] = {
     b"ALIAS": frozenset(),
@@ -374,12 +391,18 @@ class FakeNative:
         text = name.decode("ascii").upper()
         if len(text) > 242:
             raise FakeStatus(S_NAME_TOO_LONG)
+        if text in RESERVED_NAME_SAMPLE:
+            raise FakeStatus(HNRESW)
         if text in handle.objects:
             raise FakeStatus(S_EXISTS)
         if text in self.refuse_objects:
             raise FakeStatus(self.refuse_objects[text])
         if class_code not in (1, 2):
             raise FakeStatus(HBOPT)
+        if type_code == FREQUENCY_CASE or (type_code >= 8 and type_code not in FREQUENCY_NAMES):
+            # The library's type boundary: the case frequency (and any unknown
+            # code) is not an object type, whatever the index frequency.
+            raise FakeStatus(HBOBJT)
         nc = self.profile.index_nc
         handle.objects[text] = FakeObject(
             class_code,
@@ -1151,6 +1174,17 @@ def make_nc_to_na_backend() -> StatusAdapter:
     """
     adapter = make_fake(persist=True)
     adapter.fake.nc_to_na_nonmonthly = True
+    return adapter
+
+
+def make_kind_refusing_backend() -> StatusAdapter:
+    """Refuses the creation of one bridge kind object; later kinds must still verify.
+
+    The status is the library's reserved-name refusal, so the runner's
+    per-object containment is exercised with a realistic primary failure.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.refuse_objects = {"K_BOOLEAN_SCALAR": HNRESW, "F_DAILY": HNRESW}
     return adapter
 
 
