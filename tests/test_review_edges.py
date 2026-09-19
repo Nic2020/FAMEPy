@@ -61,7 +61,7 @@ def test_series_checks_before_open(session, tmp_path, kind):
     ts = (
         TSeries(MIT.from_yp(Monthly(), 2**31, 1), np.ones(1))
         if kind == "date"
-        else TSeries(mm(2020, 1), np.empty(0, dtype=np.float32))
+        else TSeries(mm(2020, 1), np.empty(0, dtype=np.complex128))
     )
     session._native.fake.calls.clear()
     with pytest.raises(famepy.DataValidationError):

@@ -97,16 +97,50 @@ configured from the installed header's declarations, a failure captures the
 text immediately and exposes it as `error.extended_text` and
 `session.extended_error_text()`, never in the exception message.
 
-## TimeSeriesEconPy bridge (monthly precision)
+## TimeSeriesEconPy bridge
 
 ```python
-from tsecon import TSeries, mm
+from tsecon import TSeries, Workspace, mm, qq
 from famepy import bridge
 
-ts = TSeries(mm(2020, 1), [1.0, float("nan"), 3.0])
+ts = TSeries(qq(2020, 1), [1.0, float("nan"), 3.0])
 bridge.write_tseries("synthetic.db", "ts", ts, mode="update")  # posts and closes
 back = bridge.read_tseries("synthetic.db", "ts")  # NaN for NC/NA/ND
 strict = bridge.read_tseries(db, "ts", missing="strict")  # raises on missing
+
+bridge.write_value(db, "when", qq(2021, 3))  # a date scalar
+bridge.write_value(db, "names", bridge.NameList(["a", "b"]))
+bridge.write_value(db, "text", bridge.Text("{not a list}"))
+bridge.write_value(db, "labels", ["x", "y"])  # a case string series
+bridge.read_value(db, "when")  # -> MIT
 ```
 
-See [contracts](contracts.md) for the missing and empty-series conventions.
+Every reference frequency anchor is supported (case, daily, business, the
+seven weekly endings, monthly, three quarterly, six half-yearly and twelve
+annual anchors); other library frequencies raise `UnsupportedFrequencyError`.
+Values of every kind convert as listed in [contracts](contracts.md): dates
+become `MIT`, date series `bridge.DateSeries`, string series
+`bridge.StringSeries`, name-lists `bridge.NameList`.
+
+## Workspaces
+
+```python
+w = Workspace(a=1.0, b=ts, c=Workspace(alpha=0.1, n=Workspace(s="Hello")))
+bridge.write_workspace("synthetic.db", w, mode="overwrite")  # A, B, C_ALPHA, C_N_S
+
+everything = bridge.read_workspace("synthetic.db")  # keys a, b, c_alpha, c_n_s
+nested = bridge.read_workspace("synthetic.db", collect=[("c", ["n"])])  # c.alpha, c.n.s
+some = bridge.read_workspace("synthetic.db", "a", "c?", prefix="c")  # a, alpha, n_s
+
+report = bridge.read_workspace_report("synthetic.db", raw_fallback=True)
+report.workspace, report.failures, report.raw, report.complete
+```
+
+Names are transformed by `prefix`/`glue`, `collect` and `namecase` (lower
+case by default); a transformation that would make two objects share a key
+is refused before anything is read. The strict functions raise at the first
+failure; the `*_report` variants contain failures per object and return the
+partial result with every failure listed. Multivariate series are written as
+one series per column and read back as separate series. See [contracts](contracts.md)
+for the missing, empty and text policies and the deliberate differences from
+the reference.

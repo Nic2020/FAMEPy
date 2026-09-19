@@ -5,21 +5,26 @@ Python bindings for the FAME CHLI library with integration for
 The behavioral reference is
 [FAME.jl](https://github.com/bankofcanada/FAME.jl).
 
-**Status: pre-alpha. The operational core is implemented and tested offline
-against an in-memory fake backend and an independent C shim. Diagnostic
-campaigns on an installed FAME have verified the runtime lifecycle, command
-execution and the monthly bridge on one Windows and one Linux host; the
-remaining groups are corrected in this revision and await a native run
+**Status: pre-alpha. The operational core (runtime lifecycle, local
+databases, raw object I/O, listing, commands and the monthly precision
+bridge) passed the consolidated validation campaign on one Windows and one
+Linux host with an installed FAME. The full TimeSeriesEconPy bridge added in
+this revision (every reference frequency anchor, every value kind, workspace
+reads and writes) is implemented and tested offline against an in-memory
+fake backend and an independent C shim and awaits its native run
 (see [capability status](docs/capabilities.md)).**
 
 Implemented: runtime lifecycle, databases (the five local access modes, work
 database, explicit posting), raw scalar and series I/O for precision,
 numeric, Boolean, date, string and namelist objects with preserved missing
 categories, wildcard listing with filters, command execution with recursive
-INPUT expansion, and a first TimeSeriesEconPy bridge for monthly precision
-scalars and series.
-Not implemented: other bridge frequencies, workspace and multivariate
-conversion, extended native error text (blocked on a vendor declaration).
+INPUT expansion, and the TimeSeriesEconPy bridge: values of every reference
+kind, all reference frequency anchors, workspace/mapping/multivariate
+writes and workspace reads with name transformation and per-object
+reporting.
+Not implemented: extended native error text (blocked on a vendor
+declaration), server-connection writes, multivariate reconstruction on read
+(not in the reference either).
 
 Windows and Linux x86-64 are the intended runtime platforms. A separately
 installed, licensed FAME runtime is required for FAME operations; it is not
@@ -61,7 +66,7 @@ and [security/privacy](SECURITY.md).
 
 `python -m famepy.validation --native --scratch <new-dir> --report <file>` runs
 the consolidated campaign (lifecycle, databases, raw types, discovery,
-commands, bridge) in isolated subprocesses inside a fresh run directory of a
+commands, bridge, frequencies, workspace) in isolated subprocesses inside a fresh run directory of a
 new or empty scratch, and writes one schema-validated report without paths
 or native text. A group passes only when every required case passed.
 See [native validation](docs/native-validation.md).

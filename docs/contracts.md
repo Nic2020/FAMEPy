@@ -178,6 +178,9 @@ well as the NaN-payload profile. Boolean missing codes are never coerced to True
 reference does; without it the library's own status for an existing name is
 raised. The default `observed` attribute is `summed` for floating data and
 `undefined` otherwise, matching the reference; `basis` defaults to daily.
+Both accept enumeration members, their codes or their names and are
+validated by one function (`attribute_codes`) before any native call, in
+every writer, so an invalid attribute never deletes or creates anything.
 
 ## Listing
 
@@ -205,23 +208,181 @@ those options must set them again afterwards. Cleanup frees the cursor and
 attempts every option reset even after a failure; the first failure is what
 propagates.
 
-## Bridge (monthly precision)
+## Bridge
 
-NaN writes as NC. NC, NA and ND read as NaN by default (`missing="nan"`), which
-is lossy; `missing="strict"` raises `MissingValueError`; any other policy
-string raises `ValueError`. Integer arrays and integer scalars are converted
-only when every value is exactly representable in float64 (2**60 is accepted,
-2**53+1 is refused); float32 and Boolean series are refused in this release.
-Other frequencies raise `UnsupportedFrequencyError`. With a path target, all
-of these checks and the object-name check run before the database is opened,
-so an invalid input never creates, truncates or opens a file.
+The bridge converts between Python/TimeSeriesEconPy values and raw objects
+(`bridge.to_fame`, `bridge.from_fame`), reads and writes single objects
+(`read_value`, `write_value`, and the typed `read_tseries`, `write_tseries`,
+`read_scalar`, `write_scalar`) and whole workspaces (`read_workspace`,
+`write_workspace`, `read_workspace_report`, `write_workspace_report`). It
+uses TimeSeriesEconPy's public API only.
 
-Empty series: `empty="preserve"` (default) writes an empty TSeries as a truly
-empty FAME series, which stores no first date, so reading it back needs
-`empty_firstdate`. `empty="reference"` follows the reference: an empty TSeries
-writes one NA observation at its first date, and on read a single missing
-observation collapses to an empty TSeries. That encoding cannot distinguish an
-empty series from a one-observation missing series; it is opt-in for that reason.
+### Representation
+
+| Python value | FAME object | read back as |
+|---|---|---|
+| `float`, `numpy.float64` | precision scalar | `float` |
+| `numpy.float32` | numeric scalar | `numpy.float32` |
+| `int` (exactly representable in float64) | precision scalar | `float` |
+| `bool`, `numpy.bool_` | Boolean scalar | `bool` |
+| `MIT` | date scalar with the moment's frequency | `MIT` |
+| `str` not shaped `{...}` | string scalar | `str` |
+| `str` shaped `{...}` | namelist (the reference's detection) | `NameList` |
+| `bridge.Text("{literal}")` | string scalar, always | `str` |
+| `bridge.NameList([...])` | namelist (members upper-cased, as the reference writes) | `NameList` |
+| `bytes` | string scalar, always literal | `str` (`bytes` with `text="bytes"`) |
+| `list`/`tuple` of `str` | case string series from index 1 | `StringSeries` at `MIT(Unit(), 1)` |
+| `TSeries` float64 or exact integers | precision series | `TSeries` float64 |
+| `TSeries` float32 | numeric series | `TSeries` float32 |
+| `TSeries` bool | Boolean series | `TSeries` bool |
+| `bridge.DateSeries` | date series | `DateSeries` |
+| `bridge.StringSeries` | string series | `StringSeries` |
+| `Workspace`, mapping, `MVTSeries` | one object per flattened name | separate members (no reconstruction) |
+
+Deliberate differences from the reference, each covered by tests:
+
+- An `int` becomes a precision scalar when it is exactly representable in
+  float64 and is refused otherwise; the reference rounds integers to a
+  float32 numeric scalar.
+- A NaN scalar writes as NC, like NaN observations; the reference's scalar
+  NaN test never matches, so it stores a plain NaN.
+- A name-list reads back as a `NameList` of ordered members; the reference
+  returns the library's list text, whose layout the library may change.
+- A string series keeps its first date in a `StringSeries`; the reference
+  returns a bare vector.
+- A missing Boolean observation raises `MissingValueError`; the reference
+  reads it as `True`. A missing date reads as `None`; it is never an integer.
+- Existing objects are replaced by default in workspace writes (as the
+  reference does); the single-object functions default to `replace=False`.
+- Wildcard matches are ordered by name bytes and the same object matched
+  twice is read once; the reference follows the library's cursor order and
+  reads duplicates twice.
+- `write_workspace` with a path requires an explicit `mode`; the reference
+  defaults to overwrite.
+
+### Frequencies
+
+Supported index and value frequencies: `Unit` (case), `Daily`, `BDaily`
+(business, Monday to Friday), `Weekly(end_day)` for all seven endings,
+`Monthly`, `Quarterly(1..3)` (library anchors october/november/december),
+`HalfYearly(1..6)` (july..december) and `Yearly(1..12)` (january..december).
+The library names quarterly and half-yearly frequencies by one of their
+equivalent ending months; the maps are the reference's. Ten-day, biweekly,
+twice-monthly, bimonthly, ypp, ppy, intraday, weekly-pattern and undefined
+frequencies raise `UnsupportedFrequencyError` on either side and are never
+mapped to an ordinary calendar; raw reads of such objects still work.
+
+Indices go through the library's year/period functions. The year/period
+conventions are the reference's, computed from public TimeSeriesEconPy
+calendar functions: year-period moments decompose directly; daily and
+business moments use the year and the day (business day) number within the
+year; weekly moments use the year of the week's ending day and the week
+number `ceil(day_of_year / 7)` of that day, so a year has a week 53 exactly
+when a week ends on its last day (or last two days in a leap year). A
+library answer outside those conventions (a day number beyond the year, a
+week that does not end in the stated year) raises `DataValidationError`
+rather than being normalized. Case moments never touch the library: their
+index is the moment's integer value, any signed 64-bit integer; the type
+and range checks run before that fast path, so an index outside the
+signed 64-bit range is refused for every frequency. Years
+outside Python's calendar (1..9999) are refused for the day-based
+frequencies; the library's own year range applies natively.
+
+### Missing, empty and text policies
+
+`missing="nan"` (default) reads NC, NA and ND as NaN for precision and
+numeric values and as `None` for date and string values, which is lossy
+between the three categories; a missing Boolean has no in-band value and
+raises `MissingValueError` under either policy; `missing="strict"` raises
+for every missing observation. Writes encode NaN and `None` as NC. Any
+other policy string raises `ValueError`.
+
+`empty="preserve"` (default) writes an empty series as a truly empty FAME
+series, which stores no first date, so reading it back needs
+`empty_firstdate` (`EmptySeriesError` otherwise). `empty="reference"`
+follows the reference: an empty TSeries or DateSeries writes one NA
+observation at its first date, and on read a single missing observation
+collapses to an empty series (precision, numeric, Boolean and date series;
+string series are never collapsed and have no reference encoding, so they
+are written truly empty under both policies). That encoding cannot
+distinguish an empty series from a one-observation missing series, which is
+why it is opt-in.
+
+`text="ascii"` (default) decodes string values strictly and raises
+`TextEncodingError` on non-ASCII bytes; `text="bytes"` returns the bytes.
+
+With a path target, every check that does not need the database (types,
+frequencies, dtypes, exact integer conversion, policies, object names,
+flattening, collisions, cycles) and the calendar conversions run before the
+database is opened, so an invalid input never creates, truncates or opens a
+file. Path targets post after success and always close; database targets
+never post.
+
+### Workspaces
+
+Reading: positional names are explicit names or wildcard patterns (`?`
+any run, `^` one character); with none, everything (`?`) is read. Wildcards
+are expanded with `list_objects` and the `alias`, `classes`, `types` and
+`frequencies` filters; explicit names are looked up whatever their class or
+frequency, and an absent explicit name raises the library's status. Names
+are transformed in order: the `prefix` (joined by `glue`, compared
+upper-cased) is stripped from the start when present; `collect` entries (a
+name, a `(name, nested)` pair whose second element is a list, tuple or
+mapping, a mapping, or a list of those; `"?"`/`"*"` collects by the first
+glue-separated part) nest matching names into sub-workspaces; finally
+`namecase` (`str.lower` by default; any `str -> str` callable returning a
+non-empty string) produces the key. Collect matching is done on the
+library's upper-cased name against the whole prefix followed by the glue
+(a prefix may itself contain the glue, such as `"a_b"` for `A_B_C` giving
+`a_b.c`); on a match the whole prefix and glue are removed and the output
+key is produced separately (the prefix as given, or `namecase` of the
+first part for `"?"`/`"*"`, so `A_B` with `namecase=lambda s: "x_" + s.lower()`
+gives `x_a.x_b`). The reference helper removes one split part and reuses
+the transformed key for matching; neither quirk is reproduced. A name with
+nothing after the prefix and glue stays a member; `collect` with an empty
+`glue` and a self-referencing collect specification are refused.
+Every destination is computed before any object is read; two different
+objects that would land on the same key, or a key that would be both a
+value and a nested workspace, raise `NameCollisionError` and nothing is
+read. Explicit names keep their argument order; wildcard matches are ordered
+by name bytes.
+
+`read_workspace` raises at the first failure. `read_workspace_report`
+contains per-object read and conversion failures and returns a `ReadReport`
+with the partial `workspace`, the `failures` (`ObjectFailure`: FAME name,
+key path, the exception, its class name and numeric status; never library
+text) and `complete`. With `raw_fallback=True` an object the bridge cannot
+represent (unsupported frequency, missing Boolean, truly empty series,
+non-ASCII text, malformed name-list) is stored as its `RawScalar` /
+`RawSeries` and listed in `raw`; native read failures are never replaced by
+a carrier. Name resolution and collisions stay strict in both variants.
+
+Writing: workspaces, mappings and multivariate series (each argument, any
+number of them) are flattened recursively by joining names with `glue`; an
+optional `prefix` is prepended to every top-level name (`prefix=""` still
+adds the glue, `prefix=None` adds nothing). A cycle raises
+`WorkspaceCycleError`; a non-string key `TypeError`; an invalid name
+`ValueError`; two names equal under the library's case-insensitive naming
+`NameCollisionError`. All of that, the `mode`, `empty`, `basis` and
+`observed` options, every value's validation and every calendar conversion
+happen before the destination is opened and before the first create,
+replace or delete, so an invalid input never creates, truncates or opens a
+file and never mutates an open handle. With nothing to write (empty
+inputs) the destination is not opened at all: `write_workspace` returns
+`()` and the report variant an empty, complete, unposted report; creating
+an empty database is `open_database`'s job. `write_workspace` returns the
+FAME names written and raises at the first native failure (a path target
+is then closed without posting). `write_workspace_report` keeps
+flattening, names, collisions, cycles and the options strict, contains an
+invalid value, a failed conversion or a native failure per object, opens
+the destination only when at least one object converted (when every
+object failed the failures are returned and nothing is created, truncated
+or opened), writes the others, posts a path target when at least one
+object was written, and returns a `WriteReport` (`written`, `failures`,
+`posted`, `complete`). No rollback is promised: a failure after some objects were
+replaced leaves them replaced, and what the library keeps of unposted
+changes is the library's rule. Multivariate series are written as one
+series per column and are not reconstructed on read.
 
 ## Commands
 

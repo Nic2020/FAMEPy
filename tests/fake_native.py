@@ -40,12 +40,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tsecon import MIT, BDaily, Daily, Weekly, bdaily, daily, mit_to_date, weekly
 
 from famepy._constants import (
     FREQUENCY_CASE,
     FREQUENCY_FAMILIES,
     FREQUENCY_MONTHLY,
-    FREQUENCY_UNDEFINED,
 )
 from famepy._native import RangeSpec, Sentinels, WildcardEntry
 
@@ -72,6 +72,16 @@ S_BAD_MODE = 910
 S_NAME_TOO_LONG = 911
 S_REFUSED_OBJECT = 912  # a synthetic per-object creation refusal (self-test only)
 S_CLASSIFIER = 913  # a synthetic classifier failure (self-test only)
+S_BAD_YEAR = 914  # year outside the calendar the fake models (100..9999)
+S_BAD_DATE = 915  # period outside the year for the frequency
+S_BAD_FREQUENCY = 916  # frequency without a calendar in the fake
+
+# The fake's calendar. Monthly indices keep the ``12 * year + period - 1``
+# layout the earlier tests rely on; every other calendar frequency maps a
+# moment to its TimeSeriesEconPy integer value plus an offset, so that code
+# which assumed a library index equals a tsecon value would be caught.
+# Case (232) indices are never converted by the bridge; the fake refuses them.
+CALENDAR_OFFSET = 5_000_000
 
 PRIVATE_MARKER = "SYNTHETIC_PRIVATE_PATH_TOKEN"
 
@@ -179,6 +189,11 @@ class FakeNative:
     corrupt_reads: dict[str, Any] = field(default_factory=dict)
     shift_ranges: dict[str, int] = field(default_factory=dict)
     fail_after: dict[str, list[int]] = field(default_factory=dict)
+    shift_periods: bool = False
+    ignore_leap_days: bool = False
+    boolean_missing_as_one: bool = False
+    omit_from_listing: set[str] = field(default_factory=set)
+    nc_to_na_nonmonthly: bool = False
 
     # -- helpers -------------------------------------------------------
 
@@ -499,6 +514,14 @@ class FakeNative:
         self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
     ) -> None:
         self._get("fame_get_booleans", "boolean", key, name, range_, out)
+        if self.boolean_missing_as_one:
+            # A defective backend: missing Boolean codes come back as true.
+            missing = (
+                (out == self.profile.boolean_nc)
+                | (out == self.profile.boolean_na)
+                | (out == self.profile.boolean_nd)
+            )
+            out[missing] = 1
 
     def get_dates(self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray) -> None:
         self._get("fame_get_dates", "date", key, name, range_, out)
@@ -518,6 +541,16 @@ class FakeNative:
         array = np.array(values, dtype=_DTYPES[kind], copy=True)
         if kind == "precision" and self.canonicalize_nan:
             array[np.isnan(array)] = np.nan
+        if (
+            kind == "precision"
+            and self.nc_to_na_nonmonthly
+            and range_ is not None
+            and range_.frequency != FREQUENCY_MONTHLY
+        ):
+            # A defective backend: every NC becomes NA outside the monthly
+            # calendar, while everything else is stored exactly.
+            nc = np.array(self.profile.precision_nc, dtype=np.float64).view(np.uint64)
+            array[array.view(np.uint64) == nc] = self.profile.precision_na
         self._write(key, name, kind, range_, list(array))
 
     def write_precisions(
@@ -628,7 +661,7 @@ class FakeNative:
         matched = [
             (name, obj)
             for name, obj in sorted(handle.objects.items())
-            if re.match(regex, name) and self._filter(obj)
+            if re.match(regex, name) and self._filter(obj) and name not in self.omit_from_listing
         ]
         cursor = self.next_cursor
         self.next_cursor += 1
@@ -751,10 +784,12 @@ class FakeNative:
     def index_to_year_period(self, frequency: int, index: int) -> tuple[int, int]:
         self._enter("fame_index_to_year_period")
         if frequency == FREQUENCY_MONTHLY:
-            return divmod(index, 12)[0], divmod(index, 12)[1] + 1
-        if frequency == FREQUENCY_UNDEFINED:
-            raise FakeStatus(HBOPT)
-        return divmod(index, 1000)[0], divmod(index, 1000)[1]
+            year, period = divmod(index, 12)[0], divmod(index, 12)[1] + 1
+        else:
+            year, period = _fake_index_to_year_period(frequency, index)
+        if self.shift_periods and frequency != FREQUENCY_MONTHLY:
+            period += 1
+        return year, period
 
     def year_period_to_index(self, frequency: int, year: int, period: int) -> int:
         self._enter("fame_year_period_to_index")
@@ -762,9 +797,88 @@ class FakeNative:
             if not 1 <= period <= 12:
                 raise FakeStatus(HBOPT)
             return year * 12 + period - 1
-        if frequency == FREQUENCY_UNDEFINED:
-            raise FakeStatus(HBOPT)
-        return year * 1000 + period
+        if not 100 <= year <= 9999:
+            raise FakeStatus(S_BAD_YEAR)
+        return _fake_year_period_to_index(frequency, year, period, self.ignore_leap_days)
+
+
+_PPY = {
+    **{code: 1 for code in range(192, 204)},
+    **{code: 2 for code in range(204, 210)},
+    **{code: 4 for code in range(160, 163)},
+}
+_WEEK_END_DAY = {16: 7, 17: 1, 18: 2, 19: 3, 20: 4, 21: 5, 22: 6}
+
+
+def _first_business_day(year: int) -> Any:
+    import datetime
+
+    first = datetime.date(year, 1, 1)
+    weekday = first.isoweekday()
+    return first + datetime.timedelta(days=8 - weekday if weekday > 5 else 0)
+
+
+def _fake_year_period_to_index(frequency: int, year: int, period: int, no_leap: bool) -> int:
+    import datetime
+
+    if frequency in _PPY:
+        ppy = _PPY[frequency]
+        if not 1 <= period <= ppy:
+            raise FakeStatus(S_BAD_DATE)
+        return ppy * year + period - 1 + CALENDAR_OFFSET
+    if frequency == 8:
+        days = 365 if no_leap else 366 if _leap(year) else 365
+        if not 1 <= period <= days:
+            raise FakeStatus(S_BAD_DATE)
+        if no_leap:
+            # A defective calendar: every year has 365 days, so days after
+            # February in a leap year are shifted by one.
+            date = datetime.date(year, 1, 1) + datetime.timedelta(days=period - 1)
+            if datetime.date(year, 1, 1) + datetime.timedelta(days=59) < date and _leap(year):
+                date += datetime.timedelta(days=1)
+            return daily(date).value + CALENDAR_OFFSET
+        return daily(datetime.date(year, 1, 1) + datetime.timedelta(days=period - 1)).value + (
+            CALENDAR_OFFSET
+        )
+    if frequency == 9:
+        start = bdaily(_first_business_day(year))
+        end = bdaily(datetime.date(year, 12, 31), bias="previous")
+        if not 1 <= period <= end.value - start.value + 1:
+            raise FakeStatus(S_BAD_DATE)
+        return start.value + period - 1 + CALENDAR_OFFSET
+    if frequency in _WEEK_END_DAY:
+        if not 1 <= period <= 53:
+            raise FakeStatus(S_BAD_DATE)
+        start = datetime.date(year, 1, 1) + datetime.timedelta(days=7 * (period - 1))
+        moment = weekly(start, _WEEK_END_DAY[frequency])
+        if _fake_index_to_year_period(frequency, moment.value + CALENDAR_OFFSET) != (year, period):
+            raise FakeStatus(S_BAD_DATE)
+        return moment.value + CALENDAR_OFFSET
+    raise FakeStatus(S_BAD_FREQUENCY)
+
+
+def _leap(year: int) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def _fake_index_to_year_period(frequency: int, index: int) -> tuple[int, int]:
+    value = index - CALENDAR_OFFSET
+    if frequency in _PPY:
+        year, remainder = divmod(value, _PPY[frequency])
+        return year, remainder + 1
+    try:
+        if frequency == 8:
+            date = mit_to_date(MIT(Daily(), value))
+            return date.year, date.timetuple().tm_yday
+        if frequency == 9:
+            date = mit_to_date(MIT(BDaily(), value))
+            return date.year, value - bdaily(_first_business_day(date.year)).value + 1
+        if frequency in _WEEK_END_DAY:
+            date = mit_to_date(MIT(Weekly(_WEEK_END_DAY[frequency]), value))
+            return date.year, -(-date.timetuple().tm_yday // 7)
+    except (ValueError, OverflowError):
+        raise FakeStatus(S_BAD_DATE) from None
+    raise FakeStatus(S_BAD_FREQUENCY)
 
 
 def _write_descriptor(descriptor: int, data: bytes) -> None:
@@ -1005,6 +1119,45 @@ def make_namelist_dropping_backend() -> StatusAdapter:
     """Namelists read back without their last member: must FAIL in both processes."""
     adapter = make_fake(persist=True)
     adapter.fake.namelist_corruption = "drop"
+    return adapter
+
+
+def make_calendar_shifting_backend() -> StatusAdapter:
+    """Reports every non-monthly index one period late: round trips must fail."""
+    adapter = make_fake(persist=True)
+    adapter.fake.shift_periods = True
+    return adapter
+
+
+def make_leap_ignoring_backend() -> StatusAdapter:
+    """A daily calendar without leap days: adjacency across February must fail."""
+    adapter = make_fake(persist=True)
+    adapter.fake.ignore_leap_days = True
+    return adapter
+
+
+def make_boolean_coercing_backend() -> StatusAdapter:
+    """Missing Boolean observations read back as true (the reference's bug shape)."""
+    adapter = make_fake(persist=True)
+    adapter.fake.boolean_missing_as_one = True
+    return adapter
+
+
+def make_nc_to_na_backend() -> StatusAdapter:
+    """Stores NA in place of every NC on non-monthly precision writes.
+
+    The bridge reads both as NaN, so only raw category assertions and
+    fixture-built manifests can catch it: frequencies and workspace must FAIL.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.nc_to_na_nonmonthly = True
+    return adapter
+
+
+def make_listing_omitting_backend() -> StatusAdapter:
+    """One written object never appears in wildcard listings: workspace reads must fail."""
+    adapter = make_fake(persist=True)
+    adapter.fake.omit_from_listing = {"C_BETA"}
     return adapter
 
 

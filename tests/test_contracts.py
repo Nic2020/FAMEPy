@@ -104,4 +104,4 @@ def test_status_messages_include_known_codes():
 def test_public_surface_exports_are_importable():
     for name in famepy.__all__:
         assert getattr(famepy, name) is not None
-    assert famepy.__version__ == "0.0.2.dev0"
+    assert famepy.__version__ == "0.0.3.dev0"

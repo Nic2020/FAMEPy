@@ -19,7 +19,7 @@ from fake_native import (
 )
 
 import famepy
-from famepy import validation
+from famepy import bridge, validation
 from famepy._wildcard import native_listing_count
 from famepy.validation import _groups, _report
 from famepy.validation._process import (
@@ -702,16 +702,29 @@ import numpy as np
 from fake_native import make_fake
 import famepy
 from famepy import bridge
+from famepy.validation._bridge_groups import anchor_moment
 from famepy.validation._groups import BRIDGE_VALUES
-from famepy.validation._julia import _expected_bits
-from tsecon import TSeries, mm
+from famepy.validation._julia import JULIA_KINDS, _expected_bits, frequency_specs
+from tsecon import TSeries, Workspace, mm, qq, yy
 script, python_path, julia_path, result_path, token = sys.argv[1:6]
 os.write(1, b"native text on stdout {not json}\n")
 print("more text")
 session = famepy.Session(native=make_fake(persist=True)).initialize()
-jts = TSeries(mm(2021, 1), np.array([1.0, np.nan, 3.0]))
-bridge.write_tseries(julia_path, "jts", jts, mode="overwrite")
-bridge.write_scalar(julia_path, "jsc", 7.5, mode="update")
+jw = Workspace(jts=TSeries(mm(2021, 1), np.array([1.0, np.nan, 3.0])), jsc=7.5)
+for label, code, _ in frequency_specs():
+    jw[f"jw_{label}"] = TSeries(anchor_moment(code), np.array([1.0, np.nan, 2.5]))
+jw["jkw_bool"] = True
+jw["jkw_str"] = "Hello"
+jw["jkw_nl"] = "{A,B}"
+jw["jkw_num"] = np.float32(1.5)
+jw["jkw_int"] = np.float32(3.0)  # the reference promotes integers to float32
+jw["jkw_date"] = qq(2021, 3)
+jw["jkw_boolts"] = TSeries(qq(2020, 1), np.array([True, False]))
+jw["jkw_datets"] = bridge.DateSeries(qq(2020, 1), [yy(2021), yy(2022)])
+jw["jkw_vec"] = ["x", "y"]
+jw["jkw_empty"] = TSeries(qq(1995, 1), np.empty(0))
+assert set(JULIA_KINDS) <= set(jw)
+bridge.write_workspace(julia_path, jw, mode="overwrite", empty="reference")
 session.finalize()
 result = {
     "group": "julia",
@@ -721,7 +734,17 @@ result = {
     "python_ts_first": "2020M1",
     "python_ts_bits": _expected_bits(BRIDGE_VALUES),
     "python_sc_bits": _expected_bits(np.array([2.5]))[0],
+    "pk_bool": True,
+    "pk_str": "Hello",
+    "pk_nl": "{A, B}",
+    "pk_num": "3fc00000",
+    "pk_date": str(int(qq(2021, 3))),
 }
+for label, code, _ in frequency_specs():
+    result[f"pf_{label}"] = str(int(anchor_moment(code)))
+    result[f"pf_{label}_freq"] = label
+    result[f"pf_{label}_eltype"] = "Float64"
+    result[f"pf_{label}_bits"] = _expected_bits(np.array([1.0, np.nan, 2.5]))
 mode = os.environ.get("STAND_IN_MODE", "ok")
 if mode == "oversized":
     result["padding"] = "x" * (5 * 1024 * 1024)
@@ -738,6 +761,8 @@ def _julia_context(tmp_path, monkeypatch):
     monkeypatch.setenv("FAMEPY_TESTS", str(TESTS))
     fake = make_fake(persist=True)
     session = famepy.Session(native=fake).initialize()
+    # The bridge group's database exists before the differential runs.
+    bridge.write_scalar(tmp_path / "python.db", "sc", 2.5, mode="create")
     recorder = _report.Recorder()
     julia = {"executable": sys.executable, "project": str(stand_in)}
     ctx = _groups.Context(session, tmp_path, recorder, lambda e: [], 60.0, julia, {})
@@ -767,6 +792,14 @@ def test_julia_differential_reads_a_result_file_not_stdout(tmp_path, monkeypatch
     assert statuses["julia_reads_python_scalar"] == "pass"
     assert statuses["python_reads_julia"] == "pass"
     assert statuses["python_reads_julia_values"] == "pass"
+    assert statuses["julia_fixtures_written"] == "pass"
+    assert statuses["julia_reads_python_kinds"] == "pass"
+    assert statuses["julia_reads_python_frequency:weekly_friday"] == "pass"
+    assert statuses["python_reads_julia_frequency:annual_june"] == "pass"
+    assert statuses["python_reads_julia_kind:jkw_int"] == "pass"
+    assert statuses["python_reads_julia_kind:jkw_empty"] == "pass"
+    assert all(status == "pass" for case, status in statuses.items() if "julia_kind" in case)
+    assert sum(1 for case in statuses if case.startswith("python_reads_julia_frequency:")) == 31
     assert "native text" not in json.dumps([case.to_json() for case in recorder.cases])
     logs = list(tmp_path.glob("julia-*.log"))
     assert len(logs) == 1 and b"native text" in logs[0].read_bytes()
@@ -781,6 +814,7 @@ def test_julia_differential_reads_a_result_file_not_stdout(tmp_path, monkeypatch
         recorder.cases.clear()
         _julia.run_julia_differential(ctx, tmp_path / "python.db")
         assert [(case.id, case.status, case.note) for case in recorder.cases] == [
-            ("julia_run", "fail", note)
+            ("julia_fixtures_written", "pass", None),
+            ("julia_run", "fail", note),
         ], mode
     session.finalize()

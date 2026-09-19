@@ -14,10 +14,9 @@ from famepy._constants import FREQUENCY_MONTHLY
 def test_frequency_mapping():
     assert bridge.fame_frequency(Monthly()) == FREQUENCY_MONTHLY
     assert bridge.tsecon_frequency(FREQUENCY_MONTHLY) == Monthly()
+    assert bridge.fame_frequency(Quarterly()) == 162
     with pytest.raises(bridge.UnsupportedFrequencyError):
-        bridge.fame_frequency(Quarterly())
-    with pytest.raises(bridge.UnsupportedFrequencyError):
-        bridge.tsecon_frequency(162)
+        bridge.tsecon_frequency(32)
 
 
 def test_index_conversion_uses_library(db):
@@ -26,7 +25,7 @@ def test_index_conversion_uses_library(db):
     assert bridge.index_to_mit(index, FREQUENCY_MONTHLY, database=db) == mm(2021, 7)
     assert "fame_year_period_to_index" in db.session._native.fake.calls
     with pytest.raises(bridge.UnsupportedFrequencyError):
-        bridge.mit_to_index(qq(2021, 1), database=db)
+        bridge.index_to_mit(index, 32, database=db)
 
 
 def test_series_round_trip_with_missing(db):
@@ -96,12 +95,14 @@ def test_integer_and_dtype_policy(db):
     inexact = TSeries(mm(2020, 1), np.array([2**53 + 1], dtype=np.int64))
     with pytest.raises(DataValidationError):
         bridge.write_tseries(db, "j", inexact)
+    bridge.write_tseries(db, "f", TSeries(mm(2020, 1), np.array([1.0], dtype=np.float32)))
+    assert famepy.quick_info(db, "f").kind == "numeric"
+    bridge.write_tseries(db, "b", TSeries(mm(2020, 1), np.array([True])))
+    assert famepy.quick_info(db, "b").kind == "boolean"
     with pytest.raises(DataValidationError):
-        bridge.write_tseries(db, "f", TSeries(mm(2020, 1), np.array([1.0], dtype=np.float32)))
-    with pytest.raises(DataValidationError):
-        bridge.write_tseries(db, "b", TSeries(mm(2020, 1), np.array([True])))
-    with pytest.raises(bridge.UnsupportedFrequencyError):
-        bridge.write_tseries(db, "q", TSeries(qq(2020, 1), [1.0]))
+        bridge.write_tseries(db, "c", TSeries(mm(2020, 1), np.array([1 + 2j])))
+    bridge.write_tseries(db, "q", TSeries(qq(2020, 1), [1.0]))
+    assert famepy.quick_info(db, "q").frequency == 162
     with pytest.raises(TypeError):
         bridge.from_tseries([1.0], database=db)
 
@@ -117,12 +118,13 @@ def test_scalar_round_trip(db):
     with pytest.raises(bridge.MissingValueError):
         bridge.read_scalar(db, "n", missing="strict")
     famepy.write_object(db, "str", famepy.scalar("string", b"x"))
-    with pytest.raises(DataValidationError):
-        bridge.read_scalar(db, "str")
+    assert bridge.read_scalar(db, "str") == "x"
     with pytest.raises(DataValidationError):
         bridge.read_tseries(db, "s")
     with pytest.raises(TypeError):
-        bridge.write_scalar(db, "t", "text")
+        bridge.write_scalar(db, "t", TSeries(mm(2020, 1), [1.0]))
+    with pytest.raises(TypeError):
+        bridge.write_scalar(db, "t", object())
     bridge.write_scalar(db, "big", 2**60)
     assert bridge.read_scalar(db, "big") == float(2**60)
     with pytest.raises(DataValidationError):
@@ -164,10 +166,12 @@ def test_conversion_functions_do_not_alias(db):
     assert back.values is not raw.values
     with pytest.raises(TypeError):
         bridge.to_tseries(ts, database=db)
-    with pytest.raises(famepy.UnsupportedOperationError):
-        bridge.to_tseries(
-            famepy.series("numeric", FREQUENCY_MONTHLY, 0, np.zeros(1, np.float32)), database=db
-        )
+    numeric = bridge.to_tseries(
+        famepy.series("numeric", FREQUENCY_MONTHLY, 0, np.zeros(1, np.float32)), database=db
+    )
+    assert numeric.values.dtype == np.float32
+    with pytest.raises(DataValidationError):
+        bridge.to_tseries(famepy.series("string", FREQUENCY_MONTHLY, 0, [b"a"]), database=db)
     assert isinstance(MIT.from_yp(Monthly(), 2020, 1), MIT)
 
 
@@ -180,10 +184,10 @@ def test_invalid_inputs_never_open_or_truncate_the_database(session, tmp_path):
         bridge.write_scalar(path, "x", 2**53 + 1, mode="overwrite")
     with pytest.raises(DataValidationError):
         bridge.write_tseries(
-            path, "f", TSeries(mm(2020, 1), np.array([1.0], dtype=np.float32)), mode="overwrite"
+            path, "f", TSeries(mm(2020, 1), np.array([1 + 1j], dtype=complex)), mode="overwrite"
         )
-    with pytest.raises(bridge.UnsupportedFrequencyError):
-        bridge.write_tseries(path, "q", TSeries(qq(2020, 1), [1.0]), mode="overwrite")
+    with pytest.raises(TypeError):
+        bridge.write_value(path, "q", object(), mode="overwrite")
     with pytest.raises(ValueError):
         bridge.write_tseries(
             path, "e", TSeries(mm(2020, 1), np.empty(0)), mode="overwrite", empty="other"

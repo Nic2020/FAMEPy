@@ -394,7 +394,15 @@ def _run_child(group: str, options: dict[str, Any], run_dir: Path) -> dict[str, 
     }
     if result.returncode == 32:
         record["exit_kind"] = "group_exception"
-    record["status"] = _group_status(record, REQUIRED_CASES[group])
+    required = REQUIRED_CASES[group]
+    if group == "bridge" and options.get("julia"):
+        # A configured differential is required, not optional: an unavailable
+        # or failing Julia comparison fails the group instead of qualifying it.
+        from ._julia import JULIA_REQUIRED
+
+        required = (*required, *JULIA_REQUIRED)
+        record["julia_required"] = True
+    record["status"] = _group_status(record, required)
     return record
 
 

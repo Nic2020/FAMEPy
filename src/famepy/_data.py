@@ -33,6 +33,7 @@ call, so an invalid input never deletes or creates an object.
 
 from __future__ import annotations
 
+import enum
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -460,6 +461,35 @@ def _default_observed(obj: RawObject) -> Observed:
     return Observed.SUMMED if obj.kind in ("precision", "numeric") else Observed.UNDEFINED
 
 
+def attribute_codes(basis: Any = None, observed: Any = None) -> tuple[int | None, int | None]:
+    """Validate the optional ``basis``/``observed`` attributes without any native call.
+
+    ``None`` keeps the default (daily basis; observed summed for floating
+    data, undefined otherwise). Members, their integer values or their names
+    are accepted; anything else raises ``ValueError``. Every writer validates
+    attributes through this function before it opens or mutates anything.
+    """
+
+    def code(value: Any, table: type[enum.IntEnum], what: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError(f"A {what} attribute cannot be a Boolean.")
+        if isinstance(value, str):
+            key = value.strip().upper().replace("-", "_").replace(" ", "_")
+            if key not in table.__members__:
+                raise ValueError(f"Unknown {what} attribute name.")
+            return int(table[key])
+        if isinstance(value, int):
+            try:
+                return int(table(value))
+            except ValueError:
+                raise ValueError(f"Unknown {what} attribute code.") from None
+        raise ValueError(f"A {what} attribute must be a member, code or name.")
+
+    return code(basis, Basis, "basis"), code(observed, Observed, "observed")
+
+
 def write_object(
     database: Database,
     name: str | bytes,
@@ -493,8 +523,11 @@ def write_object(
     else:
         frequency = FREQUENCY_UNDEFINED
         class_code = int(ObjectClass.SCALAR)
-    observed_code = int(_default_observed(obj) if observed is None else Observed(observed))
-    basis_code = int(Basis(basis))
+    basis_code, observed_code = attribute_codes(basis, observed)
+    if basis_code is None:
+        basis_code = int(Basis.DAILY)
+    if observed_code is None:
+        observed_code = int(_default_observed(obj))
     payload = _prepare(obj)
     range_ = obj.range() if isinstance(obj, RawSeries) else None
     with database.operation("write object") as native:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "FAMEPy"
-version = "0.0.2.dev0"
+version = "0.0.3.dev0"
 description = "Python bindings and time-series integration for the FAME CHLI library"
 readme = "README.md"
 requires-python = ">=3.11"

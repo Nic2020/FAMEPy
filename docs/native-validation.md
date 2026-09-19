@@ -87,7 +87,8 @@ Execution order and gates:
    native call, and finally a spawned fresh-process child that initializes,
    reads the version and finalizes on its own. Failure blocks the remaining
    groups.
-3. `database`, `raw_matrix`, `discovery`, `commands`, `bridge`: each in its
+3. `database`, `raw_matrix`, `discovery`, `commands`, `bridge`,
+   `frequencies`, `workspace`: each in its
    own child with its own one-shot runtime and scratch subdirectory; every
    group finalizes exactly once at its end (the database group finalizes
    while a handle is still open to prove the stale-handle contract). Calendar indices
@@ -134,6 +135,41 @@ are recorded as isolated observations (an option error there is recorded,
 never propagated). Within `commands`, a failing case names the stage that
 returned the status.
 
+Within `bridge`, after the monthly precision cases, every value kind of the
+reference is written through the bridge and read back (numeric, integer,
+Boolean, date, string, literal brace string, name-list, string vector,
+numeric/Boolean/date/string series), each missing category of each kind is
+written raw and read through the bridge (floating values as NaN, dates and
+strings as `None`, a missing Boolean refused, strict mode refused), and the
+reference's empty-series cases are written and read under the reference
+convention. Within `frequencies`, every calendar frequency anchor of the
+reference (daily, business, seven weekly endings, monthly, three quarterly,
+six half-yearly and twelve annual anchors) is checked against structural
+facts of the library's own index space rather than an assumed epoch: the
+inverse conversion of a fixed moment, adjacency of consecutive periods
+(across the 2020 leap day and a weekend), continuity across the 2020/2021
+boundary and the number of periods in 2020 (366 days, 262 business days,
+52 or 53 weeks per ending, the periods per year otherwise); the library's
+year/period reading of the last week of 2020 is recorded as an observation
+because the week-53 numbering is reference-derived. One precision series
+and one date scalar per anchor, plus representative date-value/index
+frequency combinations (including case), are written, read back through
+the bridge and, separately, as raw objects whose stored bits and missing
+categories are asserted against the fixture and the explicitly loaded NC
+sentinel, then verified across processes against manifests built from the
+fixtures and the verified calendar conversion, never from what was read
+back (a backend that stores NA in place of NC fails both); an unsupported library frequency must be refused
+by the bridge and case indices must pass through untouched. Within
+`workspace`, the reference's workspace test (a scalar, a quarterly series, a
+two-column monthly multivariate series and two nesting levels) is written,
+listed, read whole (its quarterly series carries one missing observation
+whose raw category is asserted), by explicit names, by wildcard, with
+prefix stripping and with one- and two-level collection; collisions after transformation and
+an absent explicit name must be refused; the report variants must contain
+an unconvertible object and a missing Boolean, and fall back to raw carriers
+on request; a contained write must report completeness and posting; and
+four objects are verified across processes.
+
 Compare every row of the [per-function checklist](abi-checklist.md) with the
 installed header before the first run, record the conclusions per row in a
 private record and pass that record's SHA-256 as `--abi-attestation`; the
@@ -178,7 +214,10 @@ object that cannot be created, a classifier that fails inside one object,
 corrupted endpoint reads, a local open that accepts the connection modes or
 leaves a file behind when refusing them, rejected family or index option
 words, reordered or dropped namelist members, refused redirections,
-failed restorations, a lost endpoint neighbour) and with adversarial child
+failed restorations, a lost endpoint neighbour, a calendar that reports
+every index one period late, a daily calendar without leap days, missing
+Boolean observations read as true, an object missing from wildcard
+listings, NC stored as NA outside the monthly calendar) and with adversarial child
 payloads and results; each must yield `FAIL` or `BLOCKED`, and no synthetic
 private marker may reach the final report. Backends that print forged
 results and diagnostics to the C-level streams, that apply a different
@@ -208,13 +247,23 @@ the command used. On a retry after a fix, record the changed identity.
 
 ## Julia differential
 
-When `--julia` is given, the bridge group writes a script that reads the
-Python-written database with FAME.jl and reports values as IEEE bit patterns,
-then writes a database for Python to read back; its result travels through
-the worker result-file protocol. The FAME.jl tree identity is
+When `--julia` is given, the bridge group first writes one precision series
+per calendar frequency anchor and one value of each kind into its database,
+then runs a generated script that reads them with FAME.jl and reports
+floating values as IEEE bit patterns and moments as their integer values
+(the two libraries share the moment encoding), and writes a database of
+independently constructed moments (one series per anchor) and kinds for
+Python to read back and compare with its own fixtures; its result travels
+through the worker result-file protocol. Julia reports, per anchor, the
+moment integer, the library frequency name of the series' frequency, the
+element type and the value bits, so anchor identity is checked in both
+directions. The FAME.jl tree identity is
 compared with the pinned reference; a different tree qualifies the comparison
 (the case is reported `unsupported`, the value comparisons carry a note) so
-that a mismatch is visible and never a silent pass.
+that a mismatch is visible and never a silent pass. When `--julia` is
+configured, every differential comparison is a required case of the
+`bridge` group (a Julia that fails to run or a missing comparison fails the
+group); without it the single `julia_differential` case is `unsupported`.
 
 ## Offline checks
 

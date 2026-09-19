@@ -5,7 +5,8 @@ Runtime: ``initialize()``, ``finalize()``, ``version()`` (one-shot per process;
 ``reset()`` is unsupported and raises).
 Databases: ``open_database()``, ``work_database()``, ``Database``.
 Objects: ``quick_info()``, ``list_objects()``, ``read_object()``, ``write_object()``.
-Commands: ``run_command()``. The tsecon bridge lives in ``famepy.bridge``.
+Commands: ``run_command()``. The TimeSeriesEconPy bridge (values, every
+reference frequency anchor, workspaces) lives in ``famepy.bridge``.
 """
 
 from ._command import expand_input, run_command
@@ -65,7 +66,7 @@ from ._text import TextEncodingError, from_native, to_native
 from ._wildcard import is_wildcard, list_objects
 from .diagnostics import diagnose
 
-__version__ = "0.0.2.dev0"
+__version__ = "0.0.3.dev0"
 __all__ = [
     "FREQUENCIES",
     "AccessMode",
