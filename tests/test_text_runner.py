@@ -354,7 +354,20 @@ def test_text_group_catches_a_truncating_library(tmp_path, child_env):
 def test_absence_check_does_not_accept_unrelated_native_error(tmp_path, monkeypatch):
     session = famepy.Session(native=make_fake(persist=True))
     recorder = _report.Recorder()
-    ctx = _groups.Context(session, tmp_path, recorder, lambda e: [], 60.0, None, {})
+
+    def unexpected_child(*args, **kwargs):
+        pytest.fail("This in-process assertion must not launch a verification child.")
+
+    ctx = _groups.Context(session, tmp_path, recorder, unexpected_child, 60.0, None, {})
+    verification_requests = []
+
+    def record_verification(case_id, manifest):
+        verification_requests.append((case_id, manifest))
+
+    # Cross-process verification has separate end-to-end tests. Isolate this
+    # assertion explicitly instead of relying on how an empty command fails.
+    monkeypatch.setattr(ctx, "verify_in_new_process", record_verification)
+    monkeypatch.setattr(_groups, "launch_worker", unexpected_child)
     original = famepy.quick_info
 
     def failing_lookup(database, name):
@@ -367,3 +380,7 @@ def test_absence_check_does_not_accept_unrelated_native_error(tmp_path, monkeypa
     case = next(c for c in recorder.cases if c.id == "refusals_left_no_object")
     assert case.status == "fail"
     assert case.error_type == "FameError"
+    assert [c for c in recorder.cases if c.status == "fail"] == [case]
+    assert len(verification_requests) == 1
+    assert verification_requests[0][0] == "cross_process"
+    assert len(verification_requests[0][1]["objects"]) == len(_text_group.TEXT_CORPUS)
