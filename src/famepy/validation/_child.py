@@ -102,10 +102,16 @@ def main(argv: list[str] | None = None) -> int:
             manifest = json.loads(manifest_path.read_text(encoding="ascii"))
             session.initialize()
             run_verify(session, manifest, recorder)
+        elif group == "verify_migration":
+            from ._migration_group import run_verify_migration
+
+            manifest_path = Path(argv[argv.index("--manifest") + 1])
+            manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+            run_verify_migration(manifest, recorder)
         else:
             GROUP_FUNCTIONS[group](context)
     except (ValueError, KeyError, IndexError, OSError) as error:
-        if group == "verify":
+        if group in ("verify", "verify_migration"):
             exit_code = 33
         else:
             recorder.add(_outside(error))

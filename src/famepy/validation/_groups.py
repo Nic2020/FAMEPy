@@ -53,6 +53,7 @@ from ._manifest import (
     manifest_object,
     verify_case_ids,
 )
+from ._migration_group import MIGRATION_REQUIRED, group_migration
 from ._process import launch_worker, reserve_result
 from ._report import Case, Recorder, encode_value
 from ._schema import sanitize_case
@@ -66,6 +67,8 @@ GROUPS = (
     "bridge",
     "frequencies",
     "workspace",
+    "extended_errors",
+    "migration",
 )
 DEPENDENT_GROUPS = GROUPS[1:]
 
@@ -114,6 +117,12 @@ class Context:
         manifest_path = self.path(f"{case_id}.manifest.json")
         manifest_path.write_text(json.dumps(manifest), encoding="ascii")
         self._run_nested(case_id, "verify", ["--manifest", str(manifest_path)])
+
+    def verify_migration_in_new_process(self, case_id: str, manifest: dict[str, Any]) -> None:
+        """Spawn a child that reopens a DataEcon archive read-only, without FAME."""
+        manifest_path = self.path(f"{case_id}.manifest.json")
+        manifest_path.write_text(json.dumps(manifest), encoding="ascii")
+        self._run_nested(case_id, "verify_migration", ["--manifest", str(manifest_path)])
 
     def fresh_process(self, case_id: str) -> None:
         """Spawn a child that runs the one-shot lifecycle in a fresh process.
@@ -1377,6 +1386,75 @@ def group_commands(ctx: Context) -> None:
     r.check("finalize", session.finalize)
 
 
+EXTENDED_ERRORS_REQUIRED = (
+    "initialize",
+    "retrieval_off_by_default",
+    "enable_retrieval",
+    "failing_command_status",
+    "extended_text_captured",
+    "extended_text_redacted",
+    "capture_failure_none",
+    "text_retrievable_after",
+    "command_after_capture",
+    "finalize",
+)
+
+
+def group_extended_errors(ctx: Context) -> None:
+    """The opt-in extended-error retrieval over the declared length and fetch calls.
+
+    This is the native gate of the ``cfmlerr`` binding: the text captured at
+    a failing command must be bytes sized by the library's own length call,
+    must never appear in the error message, and must remain retrievable
+    until the next failure. Only its length and character class are
+    reported; the text itself stays in the child.
+    """
+    session, r = ctx.session, ctx.recorder
+    r.check("initialize", session.initialize)
+    temp = ctx.path("ext-temp")
+    temp.mkdir(exist_ok=True)
+    r.expect_error(
+        "retrieval_off_by_default",
+        session.extended_error_text,
+        (famepy.UnsupportedOperationError,),
+    )
+    r.check("enable_retrieval", session.enable_extended_errors)
+    error = r.expect_error(
+        "failing_command_status",
+        lambda: famepy.run_command("fail 513", session=session, temp_dir=temp),
+        (famepy.CommandError,),
+    )
+    text = getattr(error, "extended_text", None)
+    r.equal("extended_text_captured", isinstance(text, bytes), True)
+    r.equal(
+        "extended_text_redacted",
+        error is not None
+        and isinstance(text, bytes)
+        and (len(text) == 0 or (text.decode("latin-1") not in str(error))),
+        True,
+        note="predicate only; text kept local",
+    )
+    r.equal("capture_failure_none", session.extended_error_capture_failure, None)
+    r.expect("text_retrievable_after", lambda: session.extended_error_text() == text, True)
+    if isinstance(text, bytes):
+        r.fact("extended_text_length", len(text))
+        r.fact("extended_text_is_ascii", text.isascii())
+    r.check(
+        "command_after_capture",
+        lambda: famepy.run_command("display 6+6", session=session, temp_dir=temp),
+    )
+    # A failing operation outside commands also captures under the lock;
+    # whether the library has text for it is recorded, not assumed.
+    missing = r.expect_error(
+        "missing_database_status",
+        lambda: famepy.open_database(ctx.path("absent.db"), session=session),
+        (famepy.FameError,),
+    )
+    other = getattr(missing, "extended_text", None)
+    r.fact("missing_database_text_length", None if other is None else len(other))
+    r.check("finalize", session.finalize)
+
+
 BRIDGE_REQUIRED = (
     "bridge_write",
     "bridge_read",
@@ -1494,6 +1572,8 @@ GROUP_FUNCTIONS: dict[str, Callable[[Context], None]] = {
     "bridge": group_bridge,
     "frequencies": group_frequencies,
     "workspace": group_workspace,
+    "extended_errors": group_extended_errors,
+    "migration": group_migration,
     # Not selectable from the command line: spawned by ``lifecycle``.
     "fresh_process": group_fresh_process,
 }
@@ -1507,6 +1587,8 @@ REQUIRED_CASES: dict[str, tuple[str, ...]] = {
     "bridge": BRIDGE_REQUIRED,
     "frequencies": FREQUENCIES_REQUIRED,
     "workspace": WORKSPACE_REQUIRED,
+    "extended_errors": EXTENDED_ERRORS_REQUIRED,
+    "migration": MIGRATION_REQUIRED,
 }
 
 

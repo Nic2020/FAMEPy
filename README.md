@@ -5,16 +5,15 @@ Python bindings for the FAME CHLI library with integration for
 The behavioral reference is
 [FAME.jl](https://github.com/bankofcanada/FAME.jl).
 
-**Status: pre-alpha. The operational core (runtime lifecycle, local
-databases, raw object I/O, listing, commands and the monthly precision
-bridge) passed the consolidated validation campaign on one Windows and one
-Linux host with an installed FAME. The full TimeSeriesEconPy bridge (every
-reference frequency anchor, every value kind, workspace reads and writes) is
-implemented and tested offline against an in-memory fake backend and an
-independent C shim; its first native run passed the workspace group and the
-calendar checks and failed on two invalid fixtures, corrected in this
-revision, so it awaits a new native run
-(see [capability status](docs/capabilities.md)).**
+**Status: pre-alpha. The operational core and the full TimeSeriesEconPy
+bridge (runtime lifecycle, local databases, raw object I/O, listing,
+commands, every reference frequency anchor, every value kind, workspace
+reads and writes) passed the consolidated validation campaign on one
+Windows and one Linux host with an installed FAME. The opt-in extended
+error text, the FAME-to-DataEcon migration workflow and the benchmark
+harness added since are tested offline and await their first native run
+(see [capability status](docs/capabilities.md) and the
+[parity ledger](docs/parity.md)).**
 
 Implemented: runtime lifecycle, databases (the five local access modes, work
 database, explicit posting), raw scalar and series I/O for precision,
@@ -24,9 +23,11 @@ INPUT expansion, and the TimeSeriesEconPy bridge: values of every reference
 kind, all reference frequency anchors, workspace/mapping/multivariate
 writes and workspace reads with name transformation and per-object
 reporting.
-Not implemented: extended native error text (blocked on a vendor
-declaration), server-connection writes, multivariate reconstruction on read
-(not in the reference either).
+Also: opt-in extended error text, a
+[FAME-to-DataEcon migration workflow](docs/migration.md) and a
+[benchmark harness](docs/benchmarks.md).
+Not implemented: server-connection writes, multivariate reconstruction on
+read (not in the reference either).
 
 Windows and Linux x86-64 are the intended runtime platforms. A separately
 installed, licensed FAME runtime is required for FAME operations; it is not
@@ -59,8 +60,11 @@ print(bridge.read_tseries("synthetic.db", "ts"))
 famepy.finalize()  # terminal; use a new process for another runtime
 ```
 
-See [usage](docs/usage.md), [contracts](docs/contracts.md),
-[capability status](docs/capabilities.md), [native validation](docs/native-validation.md),
+See [installation](docs/installation.md) (including offline wheelhouses),
+[usage](docs/usage.md), [contracts](docs/contracts.md),
+[capability status](docs/capabilities.md), the [parity ledger](docs/parity.md),
+[migration](docs/migration.md), [benchmarks](docs/benchmarks.md),
+[native validation](docs/native-validation.md),
 the [ABI checklist](docs/abi-checklist.md), [contributing](CONTRIBUTING.md)
 and [security/privacy](SECURITY.md).
 
@@ -68,10 +72,12 @@ and [security/privacy](SECURITY.md).
 
 `python -m famepy.validation --native --scratch <new-dir> --report <file>` runs
 the consolidated campaign (lifecycle, databases, raw types, discovery,
-commands, bridge, frequencies, workspace) in isolated subprocesses inside a fresh run directory of a
-new or empty scratch, and writes one schema-validated report without paths
-or native text. A group passes only when every required case passed.
-See [native validation](docs/native-validation.md).
+commands, bridge, frequencies, workspace, extended errors, migration) in
+isolated subprocesses inside a fresh run directory of a new or empty
+scratch, and writes one schema-validated report without paths or native
+text. A group passes only when every required case passed.
+`python -m famepy.benchmarks --native ...` produces the separate benchmark
+report. See [native validation](docs/native-validation.md).
 
 ## Repository conventions
 

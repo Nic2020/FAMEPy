@@ -170,7 +170,7 @@ def test_full_campaign_with_fake_backend_in_subprocesses(tmp_path, child_env):
             "--timeout",
             "60",
             "--groups",
-            "lifecycle,database,bridge",
+            "lifecycle,database,bridge,extended_errors",
             "--source-sha",
             "fb8ccd9f-dirty",
             "--abi-attestation",
@@ -188,10 +188,14 @@ def test_full_campaign_with_fake_backend_in_subprocesses(tmp_path, child_env):
     assert preflight["library"]["status"] == "injected_backend"
     assert preflight["scratch"]["usable"] is True
     groups = report["groups"]
-    for name in ("lifecycle", "database", "bridge"):
+    for name in ("lifecycle", "database", "bridge", "extended_errors"):
         ids = {case["id"] for case in groups[name]["cases"]}
         assert set(validation.REQUIRED_CASES[name]) <= ids
         assert groups[name]["exit_code"] == 0
+    extended = {case["id"]: case for case in groups["extended_errors"]["cases"]}
+    assert extended["extended_text_length"]["observation"] is True
+    assert extended["extended_text_length"]["actual"] == len(b"synthetic failure for fail 513")
+    assert extended["capture_failure_none"]["status"] == "pass"
     ids = {case["id"] for case in groups["database"]["cases"]}
     assert {"cross_process_scalar:meta:kept", "cross_process_scalar:values:kept"} <= ids
     assert {"stale_handle_after_finalize", "stale_close_harmless"} <= ids
@@ -210,7 +214,12 @@ def test_full_campaign_with_fake_backend_in_subprocesses(tmp_path, child_env):
     assert str(tmp_path) not in text and "Traceback" not in text
     runs = list((tmp_path / "scratch").iterdir())
     assert len(runs) == 1
-    assert sorted(p.name for p in runs[0].iterdir()) == ["bridge", "database", "lifecycle"]
+    assert sorted(p.name for p in runs[0].iterdir()) == [
+        "bridge",
+        "database",
+        "extended_errors",
+        "lifecycle",
+    ]
 
 
 def test_lifecycle_failure_blocks_dependent_groups(tmp_path, child_env):
@@ -240,6 +249,12 @@ def test_lifecycle_failure_blocks_dependent_groups(tmp_path, child_env):
             ["lifecycle", "database"],
             "database",
             "cross_process_scalar:reopen:kept",
+        ),
+        (
+            "make_overlong_error_backend",
+            ["lifecycle", "extended_errors"],
+            "extended_errors",
+            "extended_text_captured",
         ),
     ],
 )

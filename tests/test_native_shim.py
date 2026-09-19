@@ -261,26 +261,27 @@ def test_commands_output_and_cleanup(session, library, tmp_path):
 
 
 def test_extended_error_mechanics_with_shim_declared_lengths(session, library, tmp_path):
-    """The shim declares its own cfmlerr; this checks retrieval mechanics only."""
-    length_function = helper(library, "cfmlerr", None, [ct.POINTER(ct.c_int32)] * 2)
-
-    def query_length(native):
-        status, length = ct.c_int32(-1), ct.c_int32(-1)
-        length_function(ct.byref(status), ct.byref(length))
-        famepy.check_status(status.value)
-        return length.value
-
-    def fetch(native, buffer):
-        native.binding.call("cfmferr", ct.cast(buffer, C))
-
-    session.extended_error_retrieval = ExtendedErrorRetrieval(query_length, fetch)
+    """The shim declares cfmlerr with the recorded convention; mechanics only."""
+    with pytest.raises(famepy.UnsupportedOperationError):
+        session.extended_error_text()
+    retrieval = session.enable_extended_errors()
+    assert isinstance(retrieval, ExtendedErrorRetrieval)
     with pytest.raises(famepy.RuntimeStateError):
         session.extended_error_text()
     with pytest.raises(famepy.CommandError) as error:
         famepy.run_command("fail", session=session, temp_dir=tmp_path)
     assert error.value.extended_text == b"synthetic failure for fail"
+    assert "synthetic" not in str(error.value)
     assert session.extended_error_text() == b"synthetic failure for fail"
     assert helper(library, "shim_output_redirected")() == 0
+    # The declared length sizes the buffer exactly: a longer text is cut by
+    # the library at the buffer, a shorter one ends at its terminator.
+    assert session._native.extended_error_length() == len(b"synthetic failure for fail")
+    buffer = ct.create_string_buffer(b" " * 9, 10)
+    session._native.extended_error_fetch(buffer)
+    assert buffer.value == b"synthetic"
+    with pytest.raises(TypeError):
+        session._native.extended_error_fetch(b"immutable")
 
 
 def test_bridge_round_trip_through_shim(session):
@@ -297,7 +298,7 @@ def test_bridge_round_trip_through_shim(session):
 def test_probe_reports_presence_only_symbol(library):
     report = diagnose(os.environ["FAMEPY_TEST_SHIM"], probe=True)
     assert report["status"] == "symbols_found"
-    assert report["presence_only"] == {"cfmlerr": True}
+    assert report["presence_only"] == {}
     assert report["globals"]["FSTRND"] is True
     assert report["abi_verified"] is False
     assert report["native_calls_executed"] is False

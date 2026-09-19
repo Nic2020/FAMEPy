@@ -367,7 +367,7 @@ def test_library_is_fixed_for_the_process_once_loaded(fake, monkeypatch, tmp_pat
 
 
 def test_extended_error_is_captured_at_the_failure(session, tmp_path):
-    with pytest.raises(UnsupportedOperationError, match="cfmlerr"):
+    with pytest.raises(UnsupportedOperationError, match="enable_extended_errors"):
         session.extended_error_text()
     session.extended_error_retrieval = _retrieval()
     with pytest.raises(RuntimeStateError, match="captured"):
@@ -381,6 +381,34 @@ def test_extended_error_is_captured_at_the_failure(session, tmp_path):
     # The stored text belongs to that failure; it is not re-read later.
     session._native.fake.error_text = b"changed later"
     assert session.extended_error_text() == b"synthetic message"
+
+
+def test_declared_retrieval_uses_the_length_and_fetch_calls(session, tmp_path):
+    """The opt-in adapter over cfmlerr/cfmferr: bounded, captured at the failure."""
+    fake = session._native.fake
+    assert session.extended_error_retrieval is None
+    retrieval = session.enable_extended_errors()
+    assert session.extended_error_retrieval is retrieval
+    assert isinstance(retrieval, ExtendedErrorRetrieval)
+    fake.error_text = b"synthetic text 7"
+    fake.calls.clear()
+    with pytest.raises(FameError) as error:
+        famepy.open_database(tmp_path / "missing.db", session=session)
+    assert error.value.extended_text == b"synthetic text 7"
+    assert "synthetic" not in str(error.value) and "synthetic" not in repr(error.value)
+    assert fake.calls == ["cfmopdb", "cfmlerr", "cfmferr"]
+    assert session.extended_error_capture_failure is None
+    # The buffer is sized from the declared length and cut at the terminator.
+    fake.error_text = b"a" * 10
+    with pytest.raises(FameError) as error:
+        famepy.open_database(tmp_path / "missing.db", session=session)
+    assert error.value.extended_text == b"a" * 10
+    # A length beyond the bound is refused and recorded, never allocated.
+    fake.error_text = b"x" * (2**16 + 1)
+    with pytest.raises(FameError) as error:
+        famepy.open_database(tmp_path / "missing.db", session=session)
+    assert error.value.extended_text is None
+    assert session.extended_error_capture_failure == "DataValidationError"
 
 
 def test_extended_error_capture_failure_never_masks_the_status(session, tmp_path):

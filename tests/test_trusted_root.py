@@ -28,7 +28,7 @@ def _symbols():
         {
             "functions": dict.fromkeys(famepy._abi.SIGNATURES, True),
             "globals": dict.fromkeys(famepy._abi.GLOBALS, True),
-            "presence_only": {"cfmlerr": True},
+            "presence_only": {},
         }
     )
 

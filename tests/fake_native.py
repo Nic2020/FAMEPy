@@ -31,6 +31,7 @@ validation runner can be shown to report FAIL/BLOCKED for each defect.
 from __future__ import annotations
 
 import copy
+import ctypes as ct
 import os
 import pickle
 import re
@@ -211,6 +212,7 @@ class FakeNative:
     boolean_missing_as_one: bool = False
     omit_from_listing: set[str] = field(default_factory=set)
     nc_to_na_nonmonthly: bool = False
+    extended_length_override: int | None = None
 
     # -- helpers -------------------------------------------------------
 
@@ -761,6 +763,19 @@ class FakeNative:
                 self._emit(b"echo: " + line.strip() + b"\n")
         return HSUCC
 
+    def extended_error_length(self) -> int:
+        self._enter("cfmlerr")
+        if self.extended_length_override is not None:
+            return self.extended_length_override
+        return len(self.error_text)
+
+    def extended_error_fetch(self, buffer: Any) -> None:
+        self._enter("cfmferr")
+        # The library truncates to the caller's buffer length.
+        capacity = len(buffer) - 1
+        ct.memmove(buffer, self.error_text, min(capacity, len(self.error_text)))
+        buffer[min(capacity, len(self.error_text))] = b"\0"
+
     def _emit(self, text: bytes) -> None:
         if self.output_path is not None:
             with open(self.output_path, "ab") as stream:
@@ -1227,4 +1242,26 @@ def make_finite_sentinel_backend() -> StatusAdapter:
     """
     adapter = make_fake(persist=True)
     adapter.fake.profile = FINITE_SENTINELS
+    return adapter
+
+
+def make_overlong_error_backend() -> StatusAdapter:
+    """The extended-error length call reports a length beyond the package bound.
+
+    The retrieval must refuse to allocate, record the capture failure and
+    leave the status untouched; the extended-errors group cannot pass.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.extended_length_override = 2**16 + 1
+    return adapter
+
+
+def make_benchmark_corrupting_backend() -> StatusAdapter:
+    """One benchmark series reads back with invented values.
+
+    The harness verifies every read outside its timed regions, so this
+    backend must yield a failed measurement and never accepted timings.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.corrupt_reads = {"S00003": [0.5] * 24}
     return adapter

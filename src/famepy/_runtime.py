@@ -126,12 +126,14 @@ class Runtime:
 
 
 class ExtendedErrorRetrieval:
-    """Opt-in retrieval callables. The package ships no vendor declaration.
+    """Opt-in retrieval callables for the extended error text.
 
     ``query_length`` returns the message length excluding the terminator and
     ``fetch`` fills a NUL-terminated caller buffer. The session invokes both
     immediately at a failure, under the same lock and before any other native
-    call, and attaches the text to the raised error.
+    call, and attaches the text to the raised error. ``declared()`` builds
+    the pair over the library's own declared length and fetch calls; custom
+    callables remain possible for tests and other adapters.
     """
 
     def __init__(
@@ -141,6 +143,19 @@ class ExtendedErrorRetrieval:
     ) -> None:
         self.query_length = query_length
         self.fetch = fetch
+
+    @classmethod
+    def declared(cls) -> ExtendedErrorRetrieval:
+        """The retrieval over the declared ``cfmlerr``/``cfmferr`` calls.
+
+        Still opt-in: assign it to ``session.extended_error_retrieval`` (or
+        call ``session.enable_extended_errors()``). The text is captured
+        under the lock at the failing call and never placed in messages.
+        """
+        return cls(
+            lambda native: native.extended_error_length(),
+            lambda native, buffer: native.extended_error_fetch(buffer),
+        )
 
 
 class Session:
@@ -411,18 +426,30 @@ class Session:
         error.extended_captured = True
         error.extended_text = self._capture_extended_error(native)
 
+    def enable_extended_errors(self) -> ExtendedErrorRetrieval:
+        """Opt in to capturing extended error text through the declared calls.
+
+        Nothing native happens here; the text is read at the next failure,
+        under the lock, and attached to that error as ``extended_text``. It
+        may contain private command text or identifiers, which is why the
+        default leaves it off and why it never appears in messages.
+        """
+        retrieval = ExtendedErrorRetrieval.declared()
+        self.extended_error_retrieval = retrieval
+        return retrieval
+
     def extended_error_text(self) -> bytes:
         """Return the text captured at the most recent failure.
 
         Raises UnsupportedOperationError when no retrieval has been configured
-        (the vendor declaration needed to size the buffer is not established)
-        and RuntimeStateError when the last failure captured nothing. The text
-        is never placed in exception messages.
+        (the default; see ``enable_extended_errors``) and RuntimeStateError
+        when the last failure captured nothing. The text is never placed in
+        exception messages.
         """
         if self.extended_error_retrieval is None:
             raise UnsupportedOperationError(
-                "Extended error text needs a verified cfmlerr/cfmferr declaration; none is "
-                "configured. Status codes remain available on FameError."
+                "Extended error text is off by default; call enable_extended_errors() to "
+                "capture it at the next failure. Status codes remain available on FameError."
             )
         with LOCK:
             if self._last_extended_error is None:

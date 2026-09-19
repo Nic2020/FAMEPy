@@ -6,7 +6,7 @@ import pytest
 
 import famepy
 from famepy import DataValidationError, RangeSpec, TextEncodingError, from_native, to_native
-from famepy._abi import GLOBAL_TYPES, GLOBALS, PRESENCE_ONLY, SIGNATURES
+from famepy._abi import GLOBAL_TYPES, GLOBALS, PI, PRESENCE_ONLY, SIGNATURES
 from famepy._constants import (
     FREQUENCIES,
     ObjectType,
@@ -88,10 +88,13 @@ def test_check_buffer_rules():
 
 
 def test_abi_inventory_is_complete():
-    assert len(SIGNATURES) == 37
+    assert len(SIGNATURES) == 38
     assert len(GLOBALS) == 15 and set(GLOBAL_TYPES) == set(GLOBALS)
-    assert PRESENCE_ONLY == ("cfmlerr",)
-    assert "cfmlerr" not in SIGNATURES
+    assert PRESENCE_ONLY == ()
+    # The extended-error length call uses the older convention: a leading
+    # status pointer and one output int; it is bound, never called by default.
+    assert SIGNATURES["cfmlerr"].convention == "cfm"
+    assert SIGNATURES["cfmlerr"].arguments == (PI,)
 
 
 def test_status_messages_include_known_codes():

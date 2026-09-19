@@ -33,7 +33,7 @@ dev = ["pytest>=8", "ruff>=0.15", "mypy>=1.19", "build>=1.2", "hatchling>=1.27",
 packages = ["src/famepy"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/scripts", "/docs", "/licenses", "/LICENSE", "/README.md", "/SECURITY.md", "/CONTRIBUTING.md", "/pyproject.toml", "/uv.lock", "/.pre-commit-config.yaml"]
+include = ["/src", "/tests", "/scripts", "/docs", "/examples", "/licenses", "/LICENSE", "/README.md", "/SECURITY.md", "/CONTRIBUTING.md", "/pyproject.toml", "/uv.lock", "/.pre-commit-config.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

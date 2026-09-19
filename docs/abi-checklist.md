@@ -60,7 +60,7 @@ host like every other row rather than inferred from a passing width check.
 | fame_write_dates | `int key, const char *name, range *, int type, const index *values` | caller's int64 buffer; `type` is the frequency code of the dates | raw data |
 | fame_write_strings | `int key, const char *name, range *, char **values` | owned array of pointers to NUL-terminated byte strings | raw data |
 | fame_date_missing_type | `index value, int *type` | classification output | raw data |
-| cfmlerr | not declared | needed to size extended-error text; presence probed only, no call until the installed declaration (return convention, argument types and directions) is recorded | none |
+| cfmlerr | `int *length` (older convention: leading status pointer, void return) | output length of the pending extended error text, excluding the terminator; called only by the opt-in retrieval, immediately before `cfmferr` with a buffer of that length plus one | extended errors |
 
 ## Native globals
 
@@ -92,9 +92,11 @@ the bitwise form is relied on.
 | HNLALL | -1 | reference namelist selector |
 | class, type, frequency, basis, observed codes | as in `famepy._constants` | reference tables |
 
-Unknowns to record per host: the `cfmlerr` declaration, the text encoding the
-library expects for names, paths and commands, and whether initialization has
-root-level dependency requirements beyond the library directory. Both hosts
+Unknowns to record per host: the text encoding the library expects for
+names, paths and commands, and whether initialization has root-level
+dependency requirements beyond the library directory. The `cfmlerr` row was
+recorded as the older convention on both inspected installations and is now
+bound; its first native call happens in the `extended_errors` group. Both hosts
 confirmed that initialization happens once per process and that
 finalization is the last native call. Per host, the campaign records rather
 than assumes: the rule for missing observations at the ends of a written

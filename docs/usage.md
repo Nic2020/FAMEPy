@@ -92,10 +92,11 @@ object. A failed command raises `CommandError` whose `stage` says
 whether the output redirection, the command itself or the restoration
 returned the status; partial output stays on `error.output`.
 
-Extended error text is opt-in. With `session.extended_error_retrieval`
-configured from the installed header's declarations, a failure captures the
-text immediately and exposes it as `error.extended_text` and
-`session.extended_error_text()`, never in the exception message.
+Extended error text is opt-in because it can contain private command
+text or identifiers. After `session.enable_extended_errors()` a failure
+captures the text immediately (sized by the library's own length call) and
+exposes it as `error.extended_text` and `session.extended_error_text()`,
+never in the exception message.
 
 ## TimeSeriesEconPy bridge
 
@@ -150,3 +151,40 @@ partial result with every failure listed. Multivariate series are written as
 one series per column and read back as separate series. See [contracts](contracts.md)
 for the missing, empty and text policies and the deliberate differences from
 the reference.
+
+## Retiring a database into DataEcon
+
+```python
+from famepy import migration
+from tsecon.dataecon import open_dataecon
+
+plan = migration.plan_migration("synthetic.db")  # read-only, nothing written
+print(plan.summary())  # refusals, skips, losses
+report = migration.migrate("synthetic.db", "archive.daec", plan=plan)
+print(report.summary())  # per object; omissions listed
+with open_dataecon("archive.daec") as db:
+    migration.migration_status(db)  # layout, complete/incomplete, counts
+    migration.read_migrated(db, "ts")  # back in bridge terms
+```
+
+The defaults refuse every representable loss: an existing destination (a
+migration only ever creates a new file), an unsupported object, a name
+collision, an invalid first date and a stale plan stop it before anything
+is created, and an unrepresentable value marks the archive `incomplete`;
+missing categories travel in sidecar masks, and reading back verifies the
+layout structurally. Metadata the bound calls cannot retrieve is listed
+as omitted.
+See the [migration guide](migration.md) for the fidelity matrix, the
+policies and what does not travel (aliases, BASIS/OBSERVED, descriptions,
+timestamps, formulas). `examples/retire_synthetic.py` runs the workflow on
+synthetic data.
+
+## Benchmarks
+
+`python -m famepy.benchmarks --native --scratch <new-dir> --report bench.json`
+times conversion, native writes, posting, reads and the workspace forms on
+synthetic data, one worker process per measurement, verifying every read
+back and recording native call counts and memory from a separate
+instrumented pass; see [benchmarks](benchmarks.md). Without a real library
+the report says the numbers are not vendor timings; a failed measurement
+gives exit status 1.

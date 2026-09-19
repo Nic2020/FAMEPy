@@ -37,6 +37,10 @@ SIGNATURES: dict[str, Signature] = {
     "cfmfin": Signature("cfm", ()),
     "cfmver": Signature("cfm", (ct.POINTER(ct.c_float),)),
     "cfmferr": Signature("cfm", (C,)),
+    # Extended-error length: the older convention (leading status pointer,
+    # one output int) as declared by both inspected installations. Called
+    # only by the opt-in retrieval, never by a default operation.
+    "cfmlerr": Signature("cfm", (PI,)),
     "cfmfame": Signature("cfm", (S,)),
     "cfmopwk": Signature("cfm", (PI,)),
     "cfmopdb": Signature("cfm", (PI, C, INT32)),
@@ -89,10 +93,10 @@ WRITABLE_TEXT: dict[str, tuple[int, ...]] = {
     "cfmnwob": (1,),
 }
 
-# Declared in the installed headers on both inspected installations, needed to
-# size extended-error buffers, but its exact signature is not yet established.
-# Presence is probed; no call is made until a verified declaration exists.
-PRESENCE_ONLY = ("cfmlerr",)
+# Symbols probed for presence without a declaration. Empty since the
+# extended-error length function joined the declared table; the mechanism is
+# kept so that a future symbol can be inventoried before it is bound.
+PRESENCE_ONLY: tuple[str, ...] = ()
 
 # Candidate declared C types of the native globals (reference usage). Numeric
 # globals are read after initialization; string globals are three-byte arrays.

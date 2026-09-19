@@ -18,7 +18,7 @@ python -m famepy --probe
 Configure `FAME` or an absolute `FAMEPY_LIBRARY` path first (`--root` names
 the trusted installation root for an explicit library). Discovery is
 read-only; `--probe` loads the library in a subprocess and locates symbols,
-including presence-only symbols (`cfmlerr`). Neither calls initialization.
+including any presence-only symbols (none at present). Neither calls initialization.
 Missing FAME produces JSON and exit code one, never a successful test.
 
 ## Interpreting probe failures
@@ -88,7 +88,7 @@ Execution order and gates:
    reads the version and finalizes on its own. Failure blocks the remaining
    groups.
 3. `database`, `raw_matrix`, `discovery`, `commands`, `bridge`,
-   `frequencies`, `workspace`: each in its
+   `frequencies`, `workspace`, `extended_errors`, `migration`: each in its
    own child with its own one-shot runtime and scratch subdirectory; every
    group finalizes exactly once at its end (the database group finalizes
    while a handle is still open to prove the stale-handle contract). Calendar indices
@@ -196,11 +196,96 @@ a small sample of reserved words is refused as an object name with status 25
 (no vendor word list is shipped and no name validator is invented) and the
 case frequency is refused as an object type with status 16.
 
+Within `extended_errors`, the opt-in retrieval of extended error text is
+the native gate of the `cfmlerr` binding: with retrieval off the text is
+unavailable (`UnsupportedOperationError`), after `enable_extended_errors`
+a failing command must yield a `CommandError` carrying captured bytes sized
+by the library's own length call, the text must not appear in the error
+message, the capture must record no failure, the same bytes must be
+retrievable afterwards and a later command must still run. Only the length
+and whether the text is ASCII are recorded (as observations); the text
+itself never leaves the child. Whether the library also reports text for a
+failing local open is recorded, not assumed. A backend whose length call
+exceeds the package bound cannot pass: the retrieval refuses to allocate
+and the capture failure is recorded.
+
+Within `migration`, a fixture of every FAME kind as scalar and series, raw
+missing categories (NC, NA and ND), a case-indexed series, a weekly index,
+a business-daily series with a missing observation, an empty series and
+date series with and without missing observations is written to a
+synthetic database, migrated into a DataEcon file with the default (strict,
+mask) policies and read back: in the same process, and in a nested child
+that opens only the archive, every object's description must equal the
+description built from the fixture itself (exact bits, moment codes,
+categories, frequency labels, representation), and the archive's status
+mark must read `complete`. The negative cases are required too: an
+existing destination file must be refused and left byte-identical, a
+refused plan (an unsupported index frequency in the source), a name
+collision, an explicit first date of the wrong frequency and a plan
+built before the source changed must create no file, the lossy policy
+must refuse a Boolean series with missing observations and mark its
+archive `incomplete` while reporting the floating loss per object, a
+contained per-object failure (a non-ASCII string) must be reported with
+the archive marked `incomplete` and its counts, a later run onto that
+incomplete archive and onto the finished archive must be refused with
+both files byte-identical and the `incomplete` mark kept, and four
+structural corruptions applied through the public writers with the
+original attributes kept (replaced values, a mask shifted to another
+start, a carrier re-indexed by another frequency, a payload inside an
+empty carrier) must be detected in the same process and in a fresh
+process that reads only the archive. When the DataEcon native
+extension cannot load, the group records that as one blocked case and
+blocks every required case: the environment block is distinct from a
+failure and never a pass, and no fake write is substituted. See the
+[migration guide](migration.md).
+
 Compare every row of the [per-function checklist](abi-checklist.md) with the
 installed header before the first run, record the conclusions per row in a
 private record and pass that record's SHA-256 as `--abi-attestation`; the
 report carries both the attestation and the identity of the declaration table
-it applies to. Symbol presence does not validate a signature.
+it applies to. Symbol presence does not validate a signature. A new binding
+changes the declaration table identity and needs a new per-host review before
+its group can run: `cfmlerr` (the extended-error length call) joined the
+table in this revision, so the checklist row must be re-confirmed per host
+and the `extended_errors` group is its gate.
+
+## One combined session per host
+
+The release candidate is qualified in one session per platform: the
+regression campaign (all groups), the migration qualification (part of it),
+and the bounded benchmarks, from the same installed wheel and revision.
+Benchmark data is kept apart from the PASS/FAIL report and never enters it.
+
+Windows (PowerShell), after the wheel build, hash and install shown above:
+
+```powershell
+python -m famepy.validation --native --scratch .\famepy-scratch --report .\famepy-report.json `
+  --wheel .\wheelhouse\famepy-<version>-py3-none-any.whl --source-sha <revision> `
+  --abi-attestation <sha256-of-the-checklist-review-record>
+python -m famepy.benchmarks --native --scale standard --scratch .\famepy-bench `
+  --report .\famepy-bench.json `
+  --wheel .\wheelhouse\famepy-<version>-py3-none-any.whl --source-sha <revision>
+```
+
+Linux (bash), with the Julia differential and the Julia benchmark:
+
+```sh
+python -m famepy.validation --native --scratch ./famepy-scratch --report ./famepy-report.json \
+  --wheel ./wheelhouse/famepy-<version>-py3-none-any.whl --source-sha <revision> \
+  --abi-attestation <sha256-of-the-checklist-review-record> \
+  --julia /path/to/julia --julia-project /path/to/project-with-FAME.jl
+python -m famepy.benchmarks --native --scale standard --scratch ./famepy-bench \
+  --report ./famepy-bench.json \
+  --wheel ./wheelhouse/famepy-<version>-py3-none-any.whl --source-sha <revision> \
+  --julia /path/to/julia --julia-project /path/to/project-with-FAME.jl
+```
+
+Retain both reports with the same identity record (revision, wheel hash,
+library version, OS and architecture, dependency versions, commands). The
+benchmark report is described in [benchmarks](benchmarks.md); its exit
+status is 1 and its `result` is `incomplete` when any requested
+measurement failed, timed out or was rejected, and the benchmark numbers
+never enter the validation PASS/FAIL.
 
 For actual native groups, preflight requires an installed package, a source
 revision, a valid wheel whose shipped sources match the installed package, and
@@ -304,5 +389,13 @@ uv run python scripts/verify_artifacts.py   # installed wheel and sdist-rebuilt 
 The shim implements the candidate declarations over an in-memory toy database
 with fault injection, so pointer, buffer, lifetime, wildcard, command and
 extended-error mechanics are exercised end to end without vendor code. Its
-`cfmlerr` signature is the shim's own choice for testing the retrieval
-mechanics and is not a vendor fact.
+`cfmlerr` follows the declaration the package now binds (a leading status
+pointer and one output length); that the installed library agrees is what
+the per-host checklist review and the `extended_errors` group establish.
+
+The migration tests and the migration group need the DataEcon native
+extension that TimeSeriesEconPy ships in its wheels; when it cannot load,
+the tests skip with that reason (set `FAMEPY_REQUIRE_DATAECON=1` to make
+that a failure) and the runner group is blocked. `python -m famepy.benchmarks`
+with an injected backend exercises the harness only and says so in its
+report.

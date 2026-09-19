@@ -5,9 +5,9 @@
 Import never loads CHLI. `diagnose()` returns a dictionary with a schema
 version, Python/dependency versions, platform, candidate ABI layout and
 discovery status. `diagnose(probe=True)` loads the trusted library in a timed
-subprocess and checks symbol presence, including presence-only symbols such as
-`cfmlerr`, without calling CHLI. Schema version 3 adds the `presence_only` map
-and `trusted_root_known`. Exit zero means only `library_found` or
+subprocess and checks symbol presence without calling CHLI. Schema version 3
+adds the `presence_only` map (empty since every inventoried symbol is
+declared) and `trusted_root_known`. Exit zero means only `library_found` or
 `symbols_found`; neither means the ABI or a database operation was validated.
 See [native validation](native-validation.md).
 
@@ -66,17 +66,22 @@ parallel-thread throughput promise and no public arbitrary-native-call API.
 
 `check_status(0)` returns normally; other signed 32-bit integers raise
 `FameError` with the original code. Default errors never include native text.
-Extended error text is opt-in: configure `session.extended_error_retrieval`
-with an `ExtendedErrorRetrieval` whose declarations come from the installed
-header. The session then reads the text at the failure itself, under the same
-lock and before any other native call (for commands, before the output
-redirection is restored), and attaches it as `extended_text` on the raised
-`FameError`; `session.extended_error_text()` returns the text captured by the
-most recent failure. The text never enters an exception message. A retrieval
-that fails (for example a length outside the bound) never masks the status;
-its class name is kept on `extended_error_capture_failure`. The package ships
-no vendor declaration, so `extended_error_text()` raises
-`UnsupportedOperationError` until one is configured.
+Extended error text is opt-in: `session.enable_extended_errors()` (or an
+explicit `ExtendedErrorRetrieval` on `session.extended_error_retrieval`)
+turns it on. The session then reads the text at the failure itself, under
+the same lock and before any other native call (for commands, before the
+output redirection is restored): the declared length call sizes an owned
+buffer (bounded at 64 KiB; a larger reported length is refused without
+allocating) which the declared fetch call fills and the library truncates
+to. The text is attached as `extended_text` on the raised `FameError` and
+`session.extended_error_text()` returns the text captured by the most
+recent failure; it never enters an exception message, because it can carry
+private command text or identifiers. A retrieval that fails never masks the
+status; its class name is kept on `extended_error_capture_failure`. With
+retrieval off (the default) `extended_error_text()` raises
+`UnsupportedOperationError`. The length call's declaration is the older
+convention recorded on both inspected installations; the `extended_errors`
+validation group is its native gate.
 
 ## Text
 
@@ -423,6 +428,17 @@ appended when no suffix and no trailing `!`, relative names resolved against
 refused, cycles/depth/size limits enforced, and every file-system error
 (missing, unreadable, not a regular file) reported as `IncludeError` without
 a file name. Commands are limited to 2**20 bytes (reference-derived).
+
+## Migration
+
+`famepy.migration` retires a FAME database into a *new* DataEcon file under
+a documented layout with explicit loss policies: the plan is a metadata
+preview re-checked at run time, an existing destination is refused and
+never opened, the archive is written to a partial file and moved into
+place when the run finishes, and reading back verifies the layout
+structurally. See the [migration guide](migration.md) for the
+plan/run/verify contract, the fidelity matrix, the options and what a data
+migration does not carry.
 
 ## Performance
 

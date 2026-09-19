@@ -162,6 +162,8 @@ class NativeInterface(Protocol):
     def next_wildcard(self, wildcard_key: int, capacity: int) -> WildcardEntry: ...
     def free_wildcard(self, wildcard_key: int) -> None: ...
     def execute(self, command: bytes) -> int: ...
+    def extended_error_length(self) -> int: ...
+    def extended_error_fetch(self, buffer: Any) -> None: ...
     def missing_type(self, kind: str, value: Any) -> int: ...
     def index_to_year_period(self, frequency: int, index: int) -> tuple[int, int]: ...
     def year_period_to_index(self, frequency: int, year: int, period: int) -> int: ...
@@ -554,6 +556,18 @@ class CtypesNative:
         del owner, array, items
 
     # -- namelists -------------------------------------------------------
+
+    def extended_error_length(self) -> int:
+        """Length of the pending extended error text, excluding the terminator."""
+        length = ct.c_int32(-1)
+        self._binding.call("cfmlerr", ct.byref(length))
+        return int(length.value)
+
+    def extended_error_fetch(self, buffer: Any) -> None:
+        """Fill an owned NUL-terminated buffer; the library truncates to its length."""
+        if not isinstance(buffer, ct.Array) or buffer._type_ is not ct.c_char:
+            raise TypeError("Extended error text requires an owned character array.")
+        self._binding.call("cfmferr", ct.cast(buffer, C))
 
     def get_namelist(self, key: int, name: bytes) -> bytes:
         length = ct.c_int32(-1)
