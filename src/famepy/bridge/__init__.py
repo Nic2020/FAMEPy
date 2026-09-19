@@ -11,7 +11,9 @@ dependency never runs the other way. Three layers:
   through the library's own year/period functions;
 * values (``to_fame``, ``from_fame`` and the carriers ``NameList``, ``Text``,
   ``DateSeries``, ``StringSeries``): one Python value to and from one raw
-  object, with explicit missing, empty and text policies;
+  object, with explicit missing, empty and text policies (the text policy
+  selects the encoding of string values in both directions: ``ascii`` by
+  default, ``bytes``, or strict ``utf-8``);
 * single objects (``read_value``, ``write_value``, ``read_tseries``,
   ``write_tseries``, ``read_scalar``, ``write_scalar``) and workspaces
   (``read_workspace``, ``write_workspace`` and their ``*_report`` variants).
@@ -199,21 +201,24 @@ def write_value(
     empty: str = "preserve",
     basis: Any = None,
     observed: Any = None,
+    text: str = "ascii",
 ) -> None:
     """Write one value of any supported kind.
 
     Given a Database, nothing is posted. Given a path, ``mode`` is required;
     the database is opened, written, posted on success and always closed.
-    The value is fully validated and converted before the path is opened.
+    The value is fully validated and converted (including the string value
+    encoding selected by ``text``) before the path is opened.
     """
     _check_target(target, mode, writing=True)
     if mode is not None:
         access_mode(mode)
+    check_policies(empty=empty, text=text)
     object_name(name)
     attribute_codes(basis, observed)
-    validate_value(value, empty)
+    validate_value(value, empty, text)
     session = owner_session(target if isinstance(target, Database) else None)
-    raw = to_fame(value, session=session, empty=empty)
+    raw = to_fame(value, session=session, empty=empty, text=text)
     database, owned = _resolve(target, mode)
     try:
         write_object(database, name, raw, replace=replace, basis=basis, observed=observed)
@@ -309,11 +314,12 @@ def write_scalar(
     *,
     mode: Any = None,
     replace: bool = False,
+    text: str = "ascii",
 ) -> None:
     """Write one scalar value; NaN writes as NC. Validation precedes opening."""
     if isinstance(value, (TSeries, DateSeries, StringSeries, list, tuple)):
         raise TypeError("write_scalar expects a scalar value; use write_value for series.")
-    write_value(target, name, value, mode=mode, replace=replace)
+    write_value(target, name, value, mode=mode, replace=replace, text=text)
 
 
 def raw_kind(value: Any) -> str:

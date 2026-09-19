@@ -3,7 +3,9 @@
 Everything below runs against a separately installed, licensed FAME. Set the
 `FAME` environment variable to the installation (the library requires it for
 licensing) or pass an absolute library path to `initialize`. Names, paths and
-commands must be ASCII `str` values or NUL-free `bytes` in this release.
+commands must be ASCII `str` values or NUL-free `bytes` in this release;
+string *values* are ASCII by default and can be exchanged as raw bytes or,
+opt-in, as strict UTF-8 (see below).
 
 ## Runtime
 
@@ -114,6 +116,11 @@ bridge.write_value(db, "names", bridge.NameList(["a", "b"]))
 bridge.write_value(db, "text", bridge.Text("{not a list}"))
 bridge.write_value(db, "labels", ["x", "y"])  # a case string series
 bridge.read_value(db, "when")  # -> MIT
+
+bridge.write_value(db, "note", accented, text="utf-8")  # str stored as UTF-8 bytes
+bridge.read_value(db, "note", text="utf-8")  # -> the same str
+bridge.read_value(db, "note", text="bytes")  # -> the stored bytes
+bridge.read_value(db, "note")  # TextEncodingError: not ASCII
 ```
 
 Every reference frequency anchor is supported as an index (case, daily,
@@ -128,6 +135,17 @@ by the library with status 25.
 Values of every kind convert as listed in [contracts](contracts.md): dates
 become `MIT`, date series `bridge.DateSeries`, string series
 `bridge.StringSeries`, name-lists `bridge.NameList`.
+
+String values are ASCII by default. `text="bytes"` reads the stored bytes
+unchanged, and `text="utf-8"` writes `str` values as strict UTF-8 and
+decodes stored values strictly as UTF-8 on every bridge reader and writer,
+including the workspace functions; a value that cannot be encoded, an
+embedded NUL or stored bytes that are not UTF-8 raise `TextEncodingError`
+(a `*_report` variant records it per object). The policy applies to
+values only: object names, namelist members, paths and commands stay
+ASCII. Which text the library itself accepts is a property of the
+installation; the [parity ledger](parity.md) records what has been
+observed and the `text` validation group is the native gate.
 
 ## Workspaces
 

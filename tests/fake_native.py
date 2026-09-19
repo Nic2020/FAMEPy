@@ -204,6 +204,7 @@ class FakeNative:
     refuse_objects: dict[str, int] = field(default_factory=dict)
     trim_nd: bool = False
     drop_neighbour: bool = False
+    truncate_multibyte: bool = False
     corrupt_reads: dict[str, Any] = field(default_factory=dict)
     shift_ranges: dict[str, int] = field(default_factory=dict)
     fail_after: dict[str, list[int]] = field(default_factory=dict)
@@ -556,7 +557,12 @@ class FakeNative:
     ) -> list[bytes]:
         self._enter("fame_len_strings")
         self._enter("fame_get_strings")
-        return [bytes(v) for v in self._read(key, name, "string", range_, count)]
+        values = [bytes(v) for v in self._read(key, name, "string", range_, count)]
+        if self.truncate_multibyte:
+            # A defective library: the last byte of a value whose last byte is
+            # not ASCII is lost on read (stored bytes intact).
+            values = [v[:-1] if v and v[-1] >= 0x80 else v for v in values]
+        return values
 
     def _put(
         self, function: str, kind: str, key: int, name: bytes, range_: RangeSpec | None, values: Any
@@ -1264,6 +1270,18 @@ def make_range_failing_backend() -> StatusAdapter:
     """
     adapter = make_fake(persist=True)
     adapter.fake.fail_next["fame_write_precisions"] = 9
+    return adapter
+
+
+def make_text_truncating_backend() -> StatusAdapter:
+    """Returns string values without their last byte when it is not ASCII.
+
+    The text group's raw byte comparison and its decoded reads must catch
+    this for every corpus label whose last character is multibyte, in the
+    group and in the verification child; the ASCII labels must still pass.
+    """
+    adapter = make_fake(persist=True)
+    adapter.fake.truncate_multibyte = True
     return adapter
 
 

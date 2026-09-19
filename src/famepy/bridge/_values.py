@@ -52,6 +52,22 @@ at the first date and collapses a single missing observation to an empty
 series on read (floating, Boolean and date series, as the reference does;
 string series are never collapsed). That encoding cannot tell an empty
 series from a one-observation missing series, which is why it is opt-in.
+
+Text policies apply to string *values* only (string scalars, ``Text``,
+``StringSeries`` observations, plain string vectors); object names,
+namelist members, database strings and commands keep their own ASCII
+boundary. ``text="ascii"`` (default) encodes ``str`` as ASCII and decodes
+strictly as ASCII; ``text="bytes"`` encodes ``str`` as ASCII and returns
+read values as the stored bytes; ``text="utf-8"`` encodes ``str`` strictly
+as UTF-8 and decodes strictly as UTF-8. ``bytes`` inputs are written as
+given under every policy, an embedded NUL, a lone surrogate or a stored
+byte sequence that is not the selected encoding raises
+``TextEncodingError``, and a missing observation is classified by its
+native sentinel bytes before any decoding. The whole stored byte sequence
+is decoded: the reference wrapper slices its read buffer by the native
+byte length on a character index, which fails when the last character is
+multibyte; that behavior is a wrapper limitation and is deliberately not
+reproduced. No policy claims that the library itself interprets text.
 """
 
 from __future__ import annotations
@@ -78,7 +94,7 @@ from .._database import Database
 from .._errors import DataValidationError
 from .._native import MAX_OBSERVATIONS
 from .._runtime import Session
-from .._text import from_native, to_native
+from .._text import VALUE_TEXT_POLICIES, decode_value, encode_value
 from ._frequencies import (
     fame_frequency,
     index_to_mit,
@@ -106,7 +122,7 @@ __all__ = [
 
 MISSING_POLICIES = ("nan", "strict")
 EMPTY_POLICIES = ("preserve", "reference")
-TEXT_POLICIES = ("ascii", "bytes")
+TEXT_POLICIES = VALUE_TEXT_POLICIES
 
 
 class MissingValueError(ValueError):
@@ -125,7 +141,7 @@ def check_policies(
     if empty is not None and empty not in EMPTY_POLICIES:
         raise ValueError("empty must be 'preserve' or 'reference'.")
     if text is not None and text not in TEXT_POLICIES:
-        raise ValueError("text must be 'ascii' or 'bytes'.")
+        raise ValueError("text must be 'ascii', 'bytes' or 'utf-8'.")
 
 
 # -- carriers ------------------------------------------------------------------
@@ -358,9 +374,9 @@ def _looks_like_namelist(value: str) -> bool:
     return len(value) > 1 and value[0] == "{" and value[-1] == "}"
 
 
-def _prepare(value: Any, empty: str) -> _Prepared:
+def _prepare(value: Any, empty: str, text: str = "ascii") -> _Prepared:
     """Classify and validate a value without a session or database."""
-    check_policies(empty=empty)
+    check_policies(empty=empty, text=text)
     if isinstance(value, (bool, np.bool_)):
         return _Prepared("boolean", True, None, int(bool(value)), None)
     if isinstance(value, np.float32):
@@ -371,15 +387,15 @@ def _prepare(value: Any, empty: str) -> _Prepared:
         _check_value_frequency(value.frequency)
         return _Prepared("date", True, None, value, value.frequency)
     if isinstance(value, Text):
-        return _Prepared("string", True, None, to_native(value.value, what="string value"), None)
+        return _Prepared("string", True, None, encode_value(value.value, text), None)
     if isinstance(value, NameList):
         return _Prepared("namelist", True, None, value, None)
     if isinstance(value, str):
         if _looks_like_namelist(value):
             return _Prepared("namelist", True, None, NameList(value), None)
-        return _Prepared("string", True, None, to_native(value, what="string value"), None)
+        return _Prepared("string", True, None, encode_value(value, text), None)
     if isinstance(value, bytes):
-        return _Prepared("string", True, None, to_native(value, what="string value"), None)
+        return _Prepared("string", True, None, encode_value(value, text), None)
     if isinstance(value, TSeries):
         fame_frequency(value.frequency)
         kind, values = _series_kind_and_values(value.values, "TSeries values")
@@ -393,7 +409,7 @@ def _prepare(value: Any, empty: str) -> _Prepared:
     if isinstance(value, StringSeries):
         _check_length(len(value))
         items = [
-            None if item is None else to_native(item, what="string series value")
+            None if item is None else encode_value(item, text, what="string series value")
             for item in value.values
         ]
         return _Prepared("string", False, value.firstdate, items, None)
@@ -401,7 +417,7 @@ def _prepare(value: Any, empty: str) -> _Prepared:
         if not all(isinstance(item, (str, bytes)) for item in value):
             raise TypeError("A list or tuple is written as a case string series of str values.")
         _check_length(len(value))
-        items = [to_native(item, what="string series value") for item in value]
+        items = [encode_value(item, text, what="string series value") for item in value]
         return _Prepared("string", False, MIT(Unit(), 1), items, None)
     raise TypeError(f"Cannot write a {type(value).__name__} to a FAME database.")
 
@@ -415,14 +431,15 @@ def to_fame(
     database: Database | None = None,
     session: Session | None = None,
     empty: str = "preserve",
+    text: str = "ascii",
 ) -> RawObject:
     """Convert a Python value into a ``RawScalar`` or ``RawSeries`` (the reference's refame).
 
     Type, dtype, frequency, exact integer conversion and text checks happen
     before any native call; the only native calls are read-only calendar
-    conversions. The caller's arrays are never modified.
+    conversions. The caller's arrays, strings and bytes are never modified.
     """
-    prepared = _prepare(value, empty)
+    prepared = _prepare(value, empty, text)
     owner = owner_session(database, session)
     sentinels = owner.sentinels
     kind = prepared.kind
@@ -516,9 +533,7 @@ def _check_case_range(first: int, count: int) -> None:
 
 
 def _text(value: bytes, text: str) -> str | bytes:
-    if text == "bytes":
-        return value
-    return from_native(value, what="string value")
+    return decode_value(value, text)
 
 
 def _check_raw_frequency(raw: RawObject) -> None:
@@ -642,9 +657,9 @@ def _series_from_fame(
     return StringSeries(firstdate, strings)
 
 
-def validate_value(value: Any, empty: str = "preserve") -> None:
+def validate_value(value: Any, empty: str = "preserve", text: str = "ascii") -> None:
     """Run every database-independent check of ``to_fame`` without a session."""
-    _prepare(value, empty)
+    _prepare(value, empty, text)
 
 
 def _empty_series(kind: str, firstdate: MIT, value_frequency: Frequency | None) -> Any:

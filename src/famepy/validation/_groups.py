@@ -57,6 +57,7 @@ from ._migration_group import MIGRATION_REQUIRED, group_migration
 from ._process import launch_worker, reserve_result
 from ._report import Case, Recorder, encode_value
 from ._schema import sanitize_case
+from ._text_group import TEXT_REQUIRED, group_text
 
 GROUPS = (
     "lifecycle",
@@ -69,6 +70,7 @@ GROUPS = (
     "workspace",
     "extended_errors",
     "migration",
+    "text",
 )
 DEPENDENT_GROUPS = GROUPS[1:]
 
@@ -1574,6 +1576,7 @@ GROUP_FUNCTIONS: dict[str, Callable[[Context], None]] = {
     "workspace": group_workspace,
     "extended_errors": group_extended_errors,
     "migration": group_migration,
+    "text": group_text,
     # Not selectable from the command line: spawned by ``lifecycle``.
     "fresh_process": group_fresh_process,
 }
@@ -1589,6 +1592,7 @@ REQUIRED_CASES: dict[str, tuple[str, ...]] = {
     "workspace": WORKSPACE_REQUIRED,
     "extended_errors": EXTENDED_ERRORS_REQUIRED,
     "migration": MIGRATION_REQUIRED,
+    "text": TEXT_REQUIRED,
 }
 
 

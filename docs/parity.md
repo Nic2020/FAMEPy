@@ -5,8 +5,11 @@ Every exported name and qualified capability of the reference is mapped to
 its Python counterpart, classified, and tied to its evidence. Evidence
 levels: *offline* (tests against the in-memory fake backend and the
 independent C shim), *native* (the consolidated campaign passed on one
-Windows and one Linux installation at revision 82e7662) and *differential*
-(the Linux campaign's Julia comparisons; see the note on the tested tree).
+Windows and one Linux installation: eight groups at revision 82e7662 and
+all ten groups at 040fed3; the benchmarks completed on both at 85e46c5),
+*differential* (the Linux campaigns' Julia comparisons; see the note on
+the tested tree) and *bounded remote* (the same small approved selection
+read through both wrappers on both hosts; reading only).
 "Parity" means the reference's implemented behavior is reproduced;
 "difference" means a deliberate, documented departure covered by tests;
 "extension" means something the reference does not offer; "gap" means not
@@ -20,7 +23,7 @@ implemented.
 | `init_chli`, `close_chli` | `initialize()`, `finalize()`; `reset()` refuses | difference: one-shot per process, finalization terminal, no restart | native: every restart route rejected, fresh process verified |
 | `check_status`, `HLIError` | `check_status`, `FameError` with numeric status | parity; no vendor text by default | native through every failing case |
 | generated message table (`FAMEMessages.jl`) | fixed table of known codes in the package's own words, numeric fallback | difference: nothing parsed from an installation | offline |
-| extended error text (`cfmferr` after status 513) | opt-in `Session.enable_extended_errors()` over the declared `cfmlerr`/`cfmferr` calls, bounded buffer, captured at the failure, never in messages | difference: opt-in and redacted by default | offline (fake and shim); the `extended_errors` group is the native gate of the new `cfmlerr` binding, pending its first paired run |
+| extended error text (`cfmferr` after status 513) | opt-in `Session.enable_extended_errors()` over the declared `cfmlerr`/`cfmferr` calls, bounded buffer, captured at the failure, never in messages | difference: opt-in and redacted by default | native (`extended_errors` group, both hosts at 040fed3) |
 
 ## Databases
 
@@ -29,9 +32,9 @@ implemented.
 | `FameDatabase`, `opendb`, `closedb!` | `Database`, `open_database`, `close` | parity for the five local modes | native (all five modes, stale handles, cross-process) |
 | `workdb` | `work_database()` | parity | native |
 | `postdb` | `Database.post()`; high-level path writers post on success | parity; close never posts (documented) | native |
-| `:write`, `:direct_write` modes | refused before any native call | difference: server-connection modes are not bound | native (the bad-mode status recorded) |
+| `:write`, `:direct_write` modes | refused before any native call | difference: server-connection modes are not bound by the reference either; this package refuses them ahead of the library | native (the bad-mode status recorded) |
 | scoped `opendb(f, ...)` | `with open_database(...)` | parity | native |
-| remote connection strings | passed through the local open only | gap: no server-connection fixture; reads unverified, writes unbound | none |
+| remote connection strings | passed through the local open, as the reference does; the documented route is read-only | parity for reading; remote writing is outside the route in both wrappers | bounded remote: the same approved selection opened and read through both wrappers on both hosts; value-for-value equality of that selection is the next gate |
 
 ## Objects and raw I/O
 
@@ -64,6 +67,7 @@ implemented.
 | missing Boolean read as `true` | refused (`MissingValueError`) | difference | native |
 | single missing collapsed to empty | `empty="reference"` opt-in only | difference: `preserve` is the default | native |
 | string series as bare vector | `StringSeries` keeps the first date | extension | native |
+| string values as Julia `String` | `str` under the value text policy: `ascii` (default), `bytes`, or strict `utf-8` | parity for ASCII; extension of the documented policy to UTF-8 values; difference: the reference slices its read buffer by the native byte length on a character index and fails when the last character is multibyte, which is not reproduced | offline; the reference wrote every synthetic UTF-8 case and read back ASCII and internal-multibyte text with an ASCII suffix on both hosts, and this package's raw reads returned the exact bytes; the `text` group is the native gate of the `utf-8` policy, pending |
 | case (`Unit`) as a date value | refused before any native call | difference: the reference maps it and lets the library refuse (status 16) | native (the library's status asserted) |
 | frequency maps: case, daily, business, 7 weekly, monthly, 3 quarterly, 6 half-yearly, 12 annual | `fame_frequency`, `tsecon_frequency`, `mit_to_index`, `index_to_mit` | parity | native (inverse, adjacency, year boundary, period counts, round trips per anchor); differential on Linux |
 | other library frequencies | `UnsupportedFrequencyError`, never remapped | parity | native |
@@ -76,28 +80,42 @@ implemented.
 
 | Capability | Python | Evidence |
 |---|---|---|
-| Consolidated validation runner | `python -m famepy.validation` (ten groups, cross-process manifests, sanitized report) | native on both hosts for the eight groups accepted at 82e7662; `extended_errors` and `migration` added since, pending |
-| Julia differential checks | `--julia` group | Linux at 82e7662 (see below) |
-| FAME-to-DataEcon migration | `famepy.migration` ([guide](migration.md)) | offline with the installed DataEcon extension; the `migration` group is its native gate, pending |
-| Benchmarks and profiling | `python -m famepy.benchmarks` ([guide](benchmarks.md)) | offline harness tests only; no vendor timing yet |
+| Consolidated validation runner | `python -m famepy.validation` (eleven groups, cross-process manifests, sanitized report) | native on both hosts for the ten groups accepted at 040fed3; the `text` group added since, pending |
+| Julia differential checks | `--julia` in the `bridge`, `text` and benchmark runs | Linux at 82e7662, 040fed3 and 85e46c5 (see below); the text comparison is pending |
+| FAME-to-DataEcon migration | `famepy.migration` ([guide](migration.md)) | native (`migration` group, both hosts at 040fed3) |
+| Benchmarks and profiling | `python -m famepy.benchmarks` ([guide](benchmarks.md)) | all six scenarios warm and cold on both hosts at 85e46c5; Linux reference read-backs verified and nine corruptions rejected; no speed claim |
 
 ## The tested Julia tree
 
-The Linux campaign at 82e7662 ran its differential checks against a FAME.jl
-tree whose hash differs from the pinned reference. A tree comparison shows
-the two trees differ only in `README.md` (two added lines); source, build
-scripts, package metadata and tests are identical. The campaign's own
-report therefore stays *qualified* (it says what it measured against), and
-this ledger records source equivalence of the tested tree with the pinned
+The Linux campaigns ran their differential checks against a FAME.jl tree
+whose hash differs from the pinned reference. A tree comparison shows the
+two trees differ only in `README.md` (two added lines); source, build
+scripts, package metadata and tests are identical. The campaign reports
+therefore stay *qualified* (they say what they measured against), and this
+ledger records source equivalence of the tested tree with the pinned
 reference. That equivalence is a statement about those two trees, not
 about any later reference revision, and it does not establish dependency
-or environment identity.
+or environment identity. Julia has not been exercised on the Windows host
+by these campaigns.
+
+## Reference text decoding
+
+The reference wrapper stores string values as the bytes of Julia strings
+and reads them back by slicing its buffer with the byte length the library
+reports, on a character index. When the last character of a value is
+multibyte, that slice fails with a string index error before any value is
+returned, although the bytes are stored intact; ASCII values and values
+whose non-ASCII characters are followed by ASCII text read back as valid
+strings. This package decodes the whole stored byte sequence and does not
+reproduce the failure. Which byte sequences the library itself accepts or
+transforms is not established beyond the tested synthetic corpus; the
+`text` group records the outcome per corpus label on each installation.
 
 ## Remaining gaps
 
-- Server-connection reads need an approved fixture; writes stay unbound.
-- Non-ASCII text: the input boundary is ASCII until the library's encoding
-  is established from runtime evidence.
-- The `extended_errors` and `migration` groups have not yet run natively.
-- No performance figure is published; the harness exists so that the next
-  native campaign can produce measured ones.
+- Value-for-value equality of the approved remote selection (class, type,
+  frequency, range, values and missing categories) has not been compared;
+  route availability and reading are what the bounded reads established.
+- The `utf-8` value policy and the `text` group have not yet run natively;
+  the reference comparison on the same corpus runs inside that group.
+- No performance figure is published from the benchmark numbers.

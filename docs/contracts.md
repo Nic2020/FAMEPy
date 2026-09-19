@@ -96,12 +96,24 @@ dictionary keyed by them, are never modified. Input-only text (commands,
 the newer functions' `const` names) is passed as given.
 `str` input must be ASCII and is rejected otherwise; `bytes` pass through
 without NUL bytes. Returned names are bytes with an ASCII `name_text` view
-that raises on non-ASCII content. This is an initial validation boundary.
-String *values* are bytes end to end: the library's string missing sentinels
-are not ASCII text (two bytes each on both inspected installations), so
-nothing decodes a string value as text, and the validation runner exports
-string evidence only for values it constructed itself (as printable ASCII
-or bounded hex); bytes that differ from a fixture are reported by length.
+that raises on non-ASCII content. This boundary applies to object names,
+namelist members, database and connection strings, option values and
+commands, and no value policy widens it.
+
+String *values* (string scalars and string series observations) are bytes
+in the raw layer and are converted only by the bridge, under an explicit
+value text policy: `ascii` (the default) and `bytes` keep the boundary
+above, and `utf-8` encodes `str` input strictly as UTF-8 and decodes
+stored bytes strictly as UTF-8. Every policy refuses an embedded NUL, a
+lone surrogate and stored bytes that are not the selected encoding
+(`TextEncodingError`); nothing is replaced, escaped or guessed, and a
+policy never makes a claim about how the library interprets the bytes.
+The library's string missing sentinels are not ASCII text (two bytes each
+on both inspected installations); a missing observation is classified by
+its sentinel bytes before any decoding, so a sentinel is never decoded
+under any policy. The validation runner exports string evidence only for
+values it constructed itself (as printable ASCII or bounded hex); bytes
+that differ from a fixture are reported by length.
 
 ## Databases
 
@@ -332,8 +344,31 @@ are written truly empty under both policies). That encoding cannot
 distinguish an empty series from a one-observation missing series, which is
 why it is opt-in.
 
-`text="ascii"` (default) decodes string values strictly and raises
-`TextEncodingError` on non-ASCII bytes; `text="bytes"` returns the bytes.
+`text="ascii"` (default) encodes `str` string values as ASCII and decodes
+stored values strictly as ASCII, raising `TextEncodingError` otherwise;
+`text="bytes"` encodes `str` as ASCII and returns stored values as their
+bytes; `text="utf-8"` encodes `str` strictly as UTF-8 (a lone surrogate is
+refused) and decodes strictly as UTF-8 (bytes that are not UTF-8 are
+refused, never replaced). `bytes` input is written as given under every
+policy, an embedded NUL is refused under every policy, and the policy is
+validated with the other policies before any path is opened. The policy
+applies to string scalars, the `Text` carrier, `StringSeries` observations
+and plain string vectors on `to_fame`, `from_fame`, the single-object
+readers and writers (`read_value`, `read_scalar`, `write_value`,
+`write_scalar`) and the workspace readers and writers, including the
+`*_report` variants, where a value the policy cannot encode is one
+contained failure. Object names and namelist members are not values and
+stay ASCII under every policy, so a `str` shaped `{...}` with a non-ASCII
+member is still a namelist with an invalid member, while `Text` of the same
+text is a UTF-8 string scalar. The whole stored byte sequence is decoded: the reference
+wrapper slices its read buffer by the native byte length on a character
+index, which fails when the last character is multibyte (a wrapper
+limitation recorded by the `text` validation group); that behavior is
+deliberately not reproduced. Byte capacities apply to the encoded bytes,
+never to character counts. The migration reads string values under the
+default policy and does not take a text option: a value with non-ASCII
+bytes is a contained per-object failure of the run (see the
+[migration guide](migration.md)).
 
 With a path target, every check that does not need the database (types,
 frequencies, dtypes, exact integer conversion, policies, object names,
@@ -379,7 +414,8 @@ text) and `complete`. With `raw_fallback=True` an object the bridge cannot
 represent (unsupported frequency, missing Boolean, truly empty series,
 non-ASCII text, malformed name-list) is stored as its `RawScalar` /
 `RawSeries` and listed in `raw`; native read failures are never replaced by
-a carrier. Name resolution and collisions stay strict in both variants.
+a carrier. Name resolution and collisions stay strict in both variants,
+and the `text` policy of a read applies to every string value it converts.
 
 Writing: workspaces, mappings and multivariate series (each argument, any
 number of them) are flattened recursively by joining names with `glue`; an

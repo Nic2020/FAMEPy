@@ -140,9 +140,13 @@ synthesized. A date series with missing observations cannot be a
 stored as moment codes plus the mask and reads back as the same
 `DateSeries` with `None` at the gaps.
 
-Text crosses the ASCII boundary of the bridge: a string with non-ASCII
-bytes fails as a contained per-object `TextEncodingError` and the archive is
-marked `incomplete`.
+Text crosses the default (ASCII) value text policy of the bridge; the
+migration takes no `text` option, so a string with non-ASCII bytes, whether
+it was written under the bridge's opt-in `utf-8` policy or by another
+writer, fails as a contained per-object `TextEncodingError` and the archive
+is marked `incomplete`. Retiring such values is not offered until the
+archive layout records their encoding; the raw bridge reads remain
+available for them.
 
 ## Names, metadata and scope
 

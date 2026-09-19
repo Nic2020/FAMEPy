@@ -5,13 +5,16 @@ Python bindings for the FAME CHLI library with integration for
 The behavioral reference is
 [FAME.jl](https://github.com/bankofcanada/FAME.jl).
 
-**Status: pre-alpha. The operational core and the full TimeSeriesEconPy
+**Status: pre-alpha. The operational core, the full TimeSeriesEconPy
 bridge (runtime lifecycle, local databases, raw object I/O, listing,
 commands, every reference frequency anchor, every value kind, workspace
-reads and writes) passed the consolidated validation campaign on one
-Windows and one Linux host with an installed FAME. The opt-in extended
-error text, the FAME-to-DataEcon migration workflow and the benchmark
-harness added since are tested offline and await their first native run
+reads and writes), the opt-in extended error text and the FAME-to-DataEcon
+migration workflow passed the consolidated validation campaign on one
+Windows and one Linux host with an installed FAME, and the benchmark
+harness completed its scenarios on both. Bounded reads of the same
+approved remote selection through the reference and this package have
+been demonstrated on both hosts. The opt-in UTF-8 policy for string
+values added since is tested offline and awaits its first native run
 (see [capability status](docs/capabilities.md) and the
 [parity ledger](docs/parity.md)).**
 
@@ -22,12 +25,13 @@ categories, wildcard listing with filters, command execution with recursive
 INPUT expansion, and the TimeSeriesEconPy bridge: values of every reference
 kind, all reference frequency anchors, workspace/mapping/multivariate
 writes and workspace reads with name transformation and per-object
-reporting.
+reporting, with string values as ASCII, raw bytes or strict UTF-8.
 Also: opt-in extended error text, a
 [FAME-to-DataEcon migration workflow](docs/migration.md) and a
 [benchmark harness](docs/benchmarks.md).
-Not implemented: server-connection writes, multivariate reconstruction on
-read (not in the reference either).
+Not implemented: server-connection writes (the reference's remote route is
+read-only and neither wrapper binds a named-connection write API),
+multivariate reconstruction on read (not in the reference either).
 
 Windows and Linux x86-64 are the intended runtime platforms. A separately
 installed, licensed FAME runtime is required for FAME operations; it is not
@@ -72,7 +76,7 @@ and [security/privacy](SECURITY.md).
 
 `python -m famepy.validation --native --scratch <new-dir> --report <file>` runs
 the consolidated campaign (lifecycle, databases, raw types, discovery,
-commands, bridge, frequencies, workspace, extended errors, migration) in
+commands, bridge, frequencies, workspace, extended errors, migration, text) in
 isolated subprocesses inside a fresh run directory of a new or empty
 scratch, and writes one schema-validated report without paths or native
 text. A group passes only when every required case passed.

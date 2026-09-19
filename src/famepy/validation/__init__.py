@@ -402,6 +402,11 @@ def _run_child(group: str, options: dict[str, Any], run_dir: Path) -> dict[str, 
 
         required = (*required, *JULIA_REQUIRED)
         record["julia_required"] = True
+    if group == "text" and options.get("julia"):
+        from ._text_group import TEXT_JULIA_REQUIRED
+
+        required = (*required, *TEXT_JULIA_REQUIRED)
+        record["julia_required"] = True
     record["status"] = _group_status(record, required)
     return record
 

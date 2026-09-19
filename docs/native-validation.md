@@ -88,8 +88,8 @@ Execution order and gates:
    reads the version and finalizes on its own. Failure blocks the remaining
    groups.
 3. `database`, `raw_matrix`, `discovery`, `commands`, `bridge`,
-   `frequencies`, `workspace`, `extended_errors`, `migration`: each in its
-   own child with its own one-shot runtime and scratch subdirectory; every
+   `frequencies`, `workspace`, `extended_errors`, `migration`, `text`: each
+   in its own child with its own one-shot runtime and scratch subdirectory; every
    group finalizes exactly once at its end (the database group finalizes
    while a handle is still open to prove the stale-handle contract). Calendar indices
    used by the groups come from the library's own year/period conversion.
@@ -97,8 +97,8 @@ Execution order and gates:
    read-only and compares class, type, frequency, range and exact value bits
    against a manifest (string values travel as hex, so non-ASCII sentinel
    bytes and empty strings are compared exactly). The Julia differential
-   runs inside `bridge` when configured and is otherwise reported as
-   unsupported.
+   runs inside `bridge` (and the reference text comparison inside `text`)
+   when configured and is otherwise reported as unsupported.
 
 Within `raw_matrix`, every object is built and validated before the database
 is created, then written, read and verified as its own case inside its own
@@ -239,6 +239,25 @@ blocks every required case: the environment block is distinct from a
 failure and never a pass, and no fake write is substituted. See the
 [migration guide](migration.md).
 
+Within `text`, a fixed synthetic corpus of string scalars and string
+vectors (ASCII, a multibyte character followed by ASCII text, a terminal
+multibyte character, three-byte characters only, a supplementary
+character at the end and inside, an ASCII vector, a mixed vector, and a
+vector with an empty and a missing observation) is written under the
+`utf-8` policy and read under all three policies. The stored bytes are
+compared with hex literals listed next to the corpus text, decoded values
+are compared with the Python text as predicates, the refusals that must
+precede any native call (an unknown policy, a non-ASCII value under the
+default policy, a lone surrogate, an embedded NUL) are asserted together
+with the absence of any object for them, missing observations are shown
+to be classified before decoding, stored bytes that are not UTF-8 are
+shown to be refused rather than replaced, the contained workspace write
+and the raw fallback are exercised, and a verification child reopens the
+database and compares every fixture's bytes. Only corpus labels,
+predicates, lengths, error class names and the runner's own expected bytes
+are exported. With `--julia`, the same corpus is written, read back and
+cross-read by the reference wrapper; see the Julia section below.
+
 Compare every row of the [per-function checklist](abi-checklist.md) with the
 installed header before the first run, record the conclusions per row in a
 private record and pass that record's SHA-256 as `--abi-attestation`; the
@@ -256,18 +275,25 @@ regression campaign (all groups), the migration qualification (part of it),
 and the bounded benchmarks, from the same installed wheel and revision.
 Benchmark data is kept apart from the PASS/FAIL report and never enters it.
 
-Windows (PowerShell), after the wheel build, hash and install shown above:
+Windows (PowerShell), after the wheel build, hash and install shown above,
+with the Julia differential, the reference text comparison and the Julia
+benchmark when the host has a Julia project with FAME.jl (omit the three
+Julia options otherwise; the Julia cases are then reported as unsupported):
 
 ```powershell
 python -m famepy.validation --native --scratch .\famepy-scratch --report .\famepy-report.json `
   --wheel .\wheelhouse\famepy-<version>-py3-none-any.whl --source-sha <revision> `
-  --abi-attestation <sha256-of-the-checklist-review-record>
+  --abi-attestation <sha256-of-the-checklist-review-record> `
+  --julia <path-to-julia.exe> --julia-project <path-to-project-with-FAME.jl>
 python -m famepy.benchmarks --native --scale standard --scratch .\famepy-bench `
   --report .\famepy-bench.json `
-  --wheel .\wheelhouse\famepy-<version>-py3-none-any.whl --source-sha <revision>
+  --wheel .\wheelhouse\famepy-<version>-py3-none-any.whl --source-sha <revision> `
+  --julia <path-to-julia.exe> --julia-project <path-to-project-with-FAME.jl> `
+  --julia-selfcheck
 ```
 
-Linux (bash), with the Julia differential and the Julia benchmark:
+Linux (bash), the same with the Julia differential, the reference text
+comparison and the Julia benchmark:
 
 ```sh
 python -m famepy.validation --native --scratch ./famepy-scratch --report ./famepy-report.json \
@@ -290,8 +316,10 @@ never enter the validation PASS/FAIL. A revision that changes only the
 benchmark package, its tests and docs is requalified with a benchmark-only
 run per host (all six scenarios warm and cold, the configured Julia
 comparison and its negative self-check on the host that has Julia); the
-ten-group validation acceptance of the shared runtime stands until shared
-runtime, bridge or raw code changes.
+validation acceptance of the shared runtime stands until shared runtime,
+bridge or raw code changes; a revision that changes shared bridge code
+(as the value text policy does) is requalified with the full campaign on
+each host, with Julia configured on every host that has it.
 
 For actual native groups, preflight requires an installed package, a source
 revision, a valid wheel whose shipped sources match the installed package, and
@@ -382,6 +410,25 @@ that a mismatch is visible and never a silent pass. When `--julia` is
 configured, every differential comparison is a required case of the
 `bridge` group (a Julia that fails to run or a missing comparison fails the
 group); without it the single `julia_differential` case is `unsupported`.
+
+With `--julia` the `text` group also runs a generated script that writes
+the same synthetic corpus with the reference's low-level object calls
+(`refame`, `do_write`, `postdb`), reads every object back with
+`quick_info` and `do_read!`, and reads the objects this package wrote,
+reporting per corpus label the stage outcome (`ok` or the error class
+name), string validity, the code-unit length and equality with the
+expected value as predicates; no text leaves the script. The reference
+must write every label and must read back the labels it is known to
+support (ASCII, a multibyte character followed by ASCII, the ASCII
+vector); the labels known to fail in its read slicing (a value whose last
+character is multibyte, and a vector containing one) are recorded as
+*reference limitations*, observations that never satisfy a required case
+and never fail the group; one label with no established outcome is
+recorded the same way. This package's raw reads of every reference-written
+object must return the listed bytes and its `utf-8` reads the expected
+text. As in `bridge`, the tree identity is compared with the pinned
+reference and a mismatch qualifies the comparison; without `--julia` the
+single `julia_text` case is `unsupported`.
 
 ## Offline checks
 

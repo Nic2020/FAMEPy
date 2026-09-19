@@ -577,6 +577,7 @@ def _prepare_write(
     empty: str,
     basis: Any,
     observed: Any,
+    text: str,
 ) -> list[tuple[str, Any]]:
     """Every check of a workspace write that needs no session or database.
 
@@ -589,15 +590,15 @@ def _prepare_write(
         raise ValueError("Writing to a path needs an explicit mode.")
     if mode is not None:
         access_mode(mode)
-    check_policies(empty=empty)
+    check_policies(empty=empty, text=text)
     attribute_codes(basis, observed)
     return flatten_names(data, prefix=prefix, glue=glue)
 
 
 def _convert_all(
-    flat: list[tuple[str, Any]], *, session: Any, empty: str
+    flat: list[tuple[str, Any]], *, session: Any, empty: str, text: str
 ) -> list[tuple[str, RawObject]]:
-    return [(name, to_fame(value, session=session, empty=empty)) for name, value in flat]
+    return [(name, to_fame(value, session=session, empty=empty, text=text)) for name, value in flat]
 
 
 def write_workspace(
@@ -610,6 +611,7 @@ def write_workspace(
     empty: str = "preserve",
     basis: Any = None,
     observed: Any = None,
+    text: str = "ascii",
 ) -> tuple[str, ...]:
     """Write workspaces, mappings or multivariate series; the first failure raises.
 
@@ -617,15 +619,16 @@ def write_workspace(
     reference defaults to overwrite; this package asks for the mode
     explicitly), the database is posted after every object was written and
     always closed. Given a database handle nothing is posted. Every
-    validation and conversion completes before the destination is opened;
-    with nothing to write (empty inputs) the destination is not opened at
-    all and ``()`` is returned.
+    validation and conversion (including the string value encoding selected
+    by ``text``) completes before the destination is opened; with nothing
+    to write (empty inputs) the destination is not opened at all and ``()``
+    is returned.
     """
-    flat = _prepare_write(target, mode, data, prefix, glue, empty, basis, observed)
+    flat = _prepare_write(target, mode, data, prefix, glue, empty, basis, observed, text)
     for _, value in flat:
-        validate_value(value, empty)
+        validate_value(value, empty, text)
     session = owner_session(target if isinstance(target, Database) else None)
-    converted = _convert_all(flat, session=session, empty=empty)
+    converted = _convert_all(flat, session=session, empty=empty, text=text)
     if not converted:
         return ()
     database, owned = _resolve_target(target, mode)
@@ -652,26 +655,28 @@ def write_workspace_report(
     empty: str = "preserve",
     basis: Any = None,
     observed: Any = None,
+    text: str = "ascii",
 ) -> WriteReport:
     """Write with per-object containment: every object is attempted.
 
     Flattening, name validation, collisions, cycles, policies and attributes
     stay strict (nothing is written when they fail). An invalid value, a
-    conversion failure or a native failure of one object is recorded and the
-    others are still written. The destination is opened only when at least
-    one object converted: when every object failed, or there was nothing to
-    write, the report is returned without creating, truncating or opening
-    anything. With a path the database is posted when at least one object
-    was written (the report says so), then closed.
+    conversion failure (including a string value the selected ``text``
+    policy cannot encode) or a native failure of one object is recorded and
+    the others are still written. The destination is opened only when at
+    least one object converted: when every object failed, or there was
+    nothing to write, the report is returned without creating, truncating
+    or opening anything. With a path the database is posted when at least
+    one object was written (the report says so), then closed.
     """
-    flat = _prepare_write(target, mode, data, prefix, glue, empty, basis, observed)
+    flat = _prepare_write(target, mode, data, prefix, glue, empty, basis, observed, text)
     session = owner_session(target if isinstance(target, Database) else None)
     failures: list[ObjectFailure] = []
     converted: list[tuple[str, RawObject]] = []
     for name, value in flat:
         try:
-            validate_value(value, empty)
-            converted.append((name, to_fame(value, session=session, empty=empty)))
+            validate_value(value, empty, text)
+            converted.append((name, to_fame(value, session=session, empty=empty, text=text)))
         except (FameError, TypeError, ValueError, UnsupportedOperationError) as error:
             failures.append(ObjectFailure(name, (name,), error))
     if not converted:
