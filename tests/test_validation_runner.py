@@ -556,7 +556,7 @@ def test_recorder_records_no_return_values():
 
 def test_wheel_identity_compares_shipped_sources(tmp_path):
     package_dir = Path(famepy.__file__).resolve().parent
-    wheel = tmp_path / "famepy-0.0.3.dev0-py3-none-any.whl"
+    wheel = tmp_path / "famepy-0.1.0rc1-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         for file in package_dir.rglob("*.py"):
             archive.write(file, "famepy/" + file.relative_to(package_dir).as_posix())

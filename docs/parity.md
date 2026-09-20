@@ -5,11 +5,13 @@ Every exported name and qualified capability of the reference is mapped to
 its Python counterpart, classified, and tied to its evidence. Evidence
 levels: *offline* (tests against the in-memory fake backend and the
 independent C shim), *native* (the consolidated campaign passed on one
-Windows and one Linux installation: eight groups at revision 82e7662 and
-all ten groups at 040fed3; the benchmarks completed on both at 85e46c5),
-*differential* (the Linux campaigns' Julia comparisons; see the note on
-the tested tree) and *bounded remote* (the same small approved selection
-read through both wrappers on both hosts; reading only).
+Windows and one Linux installation: eight groups at revision 82e7662,
+ten at 040fed3 and all eleven at 889d219; the benchmarks completed on
+both at 85e46c5), *differential* (the FAME.jl comparisons, on Linux at
+82e7662 and 040fed3 and on both hosts at 889d219; see the note on the
+tested tree) and *bounded remote* (the same small approved selection
+read through both wrappers on both hosts and compared item by item;
+reading only).
 "Parity" means the reference's implemented behavior is reproduced;
 "difference" means a deliberate, documented departure covered by tests;
 "extension" means something the reference does not offer; "gap" means not
@@ -34,7 +36,7 @@ implemented.
 | `postdb` | `Database.post()`; high-level path writers post on success | parity; close never posts (documented) | native |
 | `:write`, `:direct_write` modes | refused before any native call | difference: server-connection modes are not bound by the reference either; this package refuses them ahead of the library | native (the bad-mode status recorded) |
 | scoped `opendb(f, ...)` | `with open_database(...)` | parity | native |
-| remote connection strings | passed through the local open, as the reference does; the documented route is read-only | parity for reading; remote writing is outside the route in both wrappers | bounded remote: the same approved selection opened and read through both wrappers on both hosts; value-for-value equality of that selection is the next gate |
+| remote connection strings | passed through the local open, as the reference does; the documented route is read-only | parity for reading; remote writing is outside the route in both wrappers | bounded remote: the same approved three-item selection read through both wrappers on both hosts and equal in class, type, frequency, range, length, stored bits, missing categories, normalized values and bridge index (nonempty annual numeric and precision series without missing observations; nothing else was listed or read) |
 
 ## Objects and raw I/O
 
@@ -67,7 +69,7 @@ implemented.
 | missing Boolean read as `true` | refused (`MissingValueError`) | difference | native |
 | single missing collapsed to empty | `empty="reference"` opt-in only | difference: `preserve` is the default | native |
 | string series as bare vector | `StringSeries` keeps the first date | extension | native |
-| string values as Julia `String` | `str` under the value text policy: `ascii` (default), `bytes`, or strict `utf-8` | parity for ASCII; extension of the documented policy to UTF-8 values; difference: the reference slices its read buffer by the native byte length on a character index and fails when the last character is multibyte, which is not reproduced | offline; the reference wrote every synthetic UTF-8 case and read back ASCII and internal-multibyte text with an ASCII suffix on both hosts, and this package's raw reads returned the exact bytes; the `text` group is the native gate of the `utf-8` policy, pending |
+| string values as Julia `String` | `str` under the value text policy: `ascii` (default), `bytes`, or strict `utf-8` | parity for ASCII; extension of the documented policy to UTF-8 values; difference: the reference slices its read buffer by the native byte length on a character index and fails when the last character is multibyte, which is not reproduced | native (`text` group, both hosts at 889d219); differential on both hosts: the reference wrote every corpus label, read back the ASCII, internal-multibyte, ASCII-vector and supplementary-inside labels with equal text, and failed in its read slicing on the terminal-multibyte labels and the mixed vector (recorded as reference limitations); this package read the listed bytes of every reference-written object |
 | case (`Unit`) as a date value | refused before any native call | difference: the reference maps it and lets the library refuse (status 16) | native (the library's status asserted) |
 | frequency maps: case, daily, business, 7 weekly, monthly, 3 quarterly, 6 half-yearly, 12 annual | `fame_frequency`, `tsecon_frequency`, `mit_to_index`, `index_to_mit` | parity | native (inverse, adjacency, year boundary, period counts, round trips per anchor); differential on Linux |
 | other library frequencies | `UnsupportedFrequencyError`, never remapped | parity | native |
@@ -80,23 +82,23 @@ implemented.
 
 | Capability | Python | Evidence |
 |---|---|---|
-| Consolidated validation runner | `python -m famepy.validation` (eleven groups, cross-process manifests, sanitized report) | native on both hosts for the ten groups accepted at 040fed3; the `text` group added since, pending |
-| Julia differential checks | `--julia` in the `bridge`, `text` and benchmark runs | Linux at 82e7662, 040fed3 and 85e46c5 (see below); the text comparison is pending |
+| Consolidated validation runner | `python -m famepy.validation` (eleven groups, cross-process manifests, sanitized report) | native on both hosts for all eleven groups at 889d219 |
+| Julia differential checks | `--julia` in the `bridge`, `text` and benchmark runs | Linux at 82e7662, 040fed3 and 85e46c5; both hosts at 889d219 for the bridge and text comparisons (see below) |
 | FAME-to-DataEcon migration | `famepy.migration` ([guide](migration.md)) | native (`migration` group, both hosts at 040fed3) |
 | Benchmarks and profiling | `python -m famepy.benchmarks` ([guide](benchmarks.md)) | all six scenarios warm and cold on both hosts at 85e46c5; Linux reference read-backs verified and nine corruptions rejected; no speed claim |
 
 ## The tested Julia tree
 
-The Linux campaigns ran their differential checks against a FAME.jl tree
-whose hash differs from the pinned reference. A tree comparison shows the
-two trees differ only in `README.md` (two added lines); source, build
-scripts, package metadata and tests are identical. The campaign reports
-therefore stay *qualified* (they say what they measured against), and this
-ledger records source equivalence of the tested tree with the pinned
-reference. That equivalence is a statement about those two trees, not
-about any later reference revision, and it does not establish dependency
-or environment identity. Julia has not been exercised on the Windows host
-by these campaigns.
+The campaigns ran their differential checks (Linux at 82e7662, 040fed3
+and 85e46c5; both hosts at 889d219) against a FAME.jl tree whose hash
+differs from the pinned reference. A tree comparison shows the two trees
+differ only in `README.md` (two added lines); source, build scripts,
+package metadata and tests are identical. The campaign reports therefore
+stay *qualified* (they say what they measured against), and this ledger
+records source equivalence of the tested tree with the pinned reference.
+That equivalence is a statement about those two trees, not about any
+later reference revision, and it does not establish dependency or
+environment identity.
 
 ## Reference text decoding
 
@@ -107,15 +109,29 @@ multibyte, that slice fails with a string index error before any value is
 returned, although the bytes are stored intact; ASCII values and values
 whose non-ASCII characters are followed by ASCII text read back as valid
 strings. This package decodes the whole stored byte sequence and does not
-reproduce the failure. Which byte sequences the library itself accepts or
-transforms is not established beyond the tested synthetic corpus; the
-`text` group records the outcome per corpus label on each installation.
+reproduce the failure. On both inspected installations the reference
+wrote all nine corpus labels, read back the ASCII value, the
+multibyte-then-ASCII value, the ASCII vector and the value with a
+supplementary character inside with text equal to what was written, and
+raised its string index error on the value ending in a two-byte
+character, the three-byte-only value, the value ending in a supplementary
+character and the vector containing one; this package's raw reads of
+every one of those objects returned the listed bytes and its `utf-8`
+reads the expected text. Which byte sequences the library itself accepts
+or transforms is not established beyond that synthetic corpus, and no
+Unicode object name, command or remote text value was tested.
 
-## Remaining gaps
+## Remaining qualifications
 
-- Value-for-value equality of the approved remote selection (class, type,
-  frequency, range, values and missing categories) has not been compared;
-  route availability and reading are what the bounded reads established.
-- The `utf-8` value policy and the `text` group have not yet run natively;
-  the reference comparison on the same corpus runs inside that group.
-- No performance figure is published from the benchmark numbers.
+- The remote evidence is one approved selection of three nonempty annual
+  numeric and precision series without missing observations on one
+  read-only route per host; missing categories, other types, string
+  values, listing and other servers were not exercised over a route.
+- The UTF-8 evidence is the fixed synthetic corpus under the explicit
+  policy; it does not establish every encoding, Unicode object names or
+  remote text values.
+- The FAME.jl comparisons ran against the README-only different tree on
+  both hosts (qualified, see above).
+- No performance figure is published from the benchmark numbers; the
+  date conversion phases are the recorded profiling candidate (see
+  [benchmarks](benchmarks.md)).

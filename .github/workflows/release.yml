@@ -1,0 +1,65 @@
+name: release
+# Artifact-only rehearsal: builds the distributions from the dispatched ref,
+# verifies exactly those files (installed-wheel tests with the C shim and the
+# DataEcon extension required, a wheel rebuilt from the sdist, inventory and
+# metadata checks), and stores them with their verification record as a run
+# artifact. Nothing is uploaded to any index here; publication is the separate
+# publish workflow, which promotes one successful run of this one.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      FAMEPY_REQUIRE_SHIM: "1"
+      FAMEPY_REQUIRE_DATAECON: "1"
+      UV_CACHE_DIR: ${{ github.workspace }}/.cache/uv
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pre-commit run --all-files
+      - name: Build independent C shim
+        run: uv run python scripts/build_test_shim.py
+      - run: echo "FAMEPY_TEST_SHIM=$GITHUB_WORKSPACE/build/test-shim/libfamepy_test.so" >> "$GITHUB_ENV"
+      - run: uv run pytest -q
+      - name: Build sdist and wheel
+        run: uv build --out-dir dist
+      - name: Check metadata and README rendering
+        run: uv run --with twine twine check --strict dist/*
+      - name: Verify exactly the built distributions
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          wheel=(dist/*.whl); sdist=(dist/*.tar.gz)
+          test "${#wheel[@]}" -eq 1 && test "${#sdist[@]}" -eq 1
+          uv run python scripts/verify_artifacts.py \
+            --wheel "${wheel[0]}" --sdist "${sdist[0]}" \
+            --source-sha "$SOURCE_SHA" --record dist/verification.json \
+            --scratch build/release-verify
+      - name: Write checksums and print the record
+        run: |
+          set -eu
+          (cd dist && sha256sum ./*.whl ./*.tar.gz | sed 's#\./##' > SHA256SUMS && cat SHA256SUMS)
+          cat dist/verification.json
+          ls -l dist
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

@@ -66,7 +66,7 @@ from ._text import TextEncodingError, from_native, to_native
 from ._wildcard import is_wildcard, list_objects
 from .diagnostics import diagnose
 
-__version__ = "0.0.3.dev0"
+__version__ = "0.1.0rc1"
 __all__ = [
     "FREQUENCIES",
     "AccessMode",

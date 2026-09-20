@@ -5,18 +5,20 @@ Python bindings for the FAME CHLI library with integration for
 The behavioral reference is
 [FAME.jl](https://github.com/bankofcanada/FAME.jl).
 
-**Status: pre-alpha. The operational core, the full TimeSeriesEconPy
-bridge (runtime lifecycle, local databases, raw object I/O, listing,
-commands, every reference frequency anchor, every value kind, workspace
-reads and writes), the opt-in extended error text and the FAME-to-DataEcon
-migration workflow passed the consolidated validation campaign on one
-Windows and one Linux host with an installed FAME, and the benchmark
-harness completed its scenarios on both. Bounded reads of the same
-approved remote selection through the reference and this package have
-been demonstrated on both hosts. The opt-in UTF-8 policy for string
-values added since is tested offline and awaits its first native run
-(see [capability status](docs/capabilities.md) and the
-[parity ledger](docs/parity.md)).**
+**Status: first release candidate (0.1.0rc1). The operational core,
+the full TimeSeriesEconPy bridge (runtime lifecycle, local databases, raw
+object I/O, listing, commands, every reference frequency anchor, every
+value kind, workspace reads and writes, the string value text policies),
+the opt-in extended error text and the FAME-to-DataEcon migration
+workflow passed the consolidated eleven-group validation campaign on one
+Windows and one Linux host with an installed FAME, with the FAME.jl
+comparisons configured on both; the benchmark harness completed its
+scenarios on both; and a bounded read-only comparison of one small
+approved remote selection was equal through the reference and this
+package on both hosts. See [capability status](docs/capabilities.md),
+the [parity ledger](docs/parity.md) and the [changelog](CHANGELOG.md).
+These are statements about the inspected installations, not blanket
+version coverage.**
 
 Implemented: runtime lifecycle, databases (the five local access modes, work
 database, explicit posting), raw scalar and series I/O for precision,
@@ -69,7 +71,8 @@ See [installation](docs/installation.md) (including offline wheelhouses),
 [capability status](docs/capabilities.md), the [parity ledger](docs/parity.md),
 [migration](docs/migration.md), [benchmarks](docs/benchmarks.md),
 [native validation](docs/native-validation.md),
-the [ABI checklist](docs/abi-checklist.md), [contributing](CONTRIBUTING.md)
+the [ABI checklist](docs/abi-checklist.md), [releasing](docs/releasing.md),
+the [changelog](CHANGELOG.md), [contributing](CONTRIBUTING.md)
 and [security/privacy](SECURITY.md).
 
 ## Validating against an installed FAME

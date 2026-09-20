@@ -1,0 +1,102 @@
+name: publish
+# Explicit promotion: an operator dispatches this workflow FROM THE RELEASE TAG
+# and names one successful run of the release workflow plus the SHA-256 of the
+# wheel and the sdist reviewed in that run's artifact. The job downloads that
+# artifact, checks provenance and identity with scripts/check_promotion.py
+# (same repository, approved workflow file, successful run, same commit as the
+# tag, same version, unexpired artifact, exact file set, digests, verification
+# record), and uploads exactly those two files with trusted publishing. Nothing
+# is built or tested here, and nothing publishes on a push or a tag by itself.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Numeric id of the successful release (rehearsal) run"
+        type: string
+        required: true
+      wheel_sha256:
+        description: "SHA-256 of the reviewed wheel (64 hex digits)"
+        type: string
+        required: true
+      sdist_sha256:
+        description: "SHA-256 of the reviewed sdist (64 hex digits)"
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: pypi
+      url: https://pypi.org/project/famepy/
+    permissions:
+      contents: read
+      actions: read # read the rehearsal run and download its artifact
+      id-token: write # trusted publishing; no stored token
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      WHEEL_SHA256: ${{ inputs.wheel_sha256 }}
+      SDIST_SHA256: ${{ inputs.sdist_sha256 }}
+      REPOSITORY: ${{ github.repository }}
+      HEAD_SHA: ${{ github.sha }}
+      REF: ${{ github.ref }}
+      REF_NAME: ${{ github.ref_name }}
+      WORKFLOW_PATH: .github/workflows/release.yml
+    steps:
+      - name: Validate the dispatch inputs and the tag
+        run: |
+          set -eu
+          case "$RUN_ID" in
+            ''|*[!0-9]*|0*) echo "run_id must be a positive integer" >&2; exit 1 ;;
+          esac
+          for digest in "$WHEEL_SHA256" "$SDIST_SHA256"; do
+            case "$digest" in
+              *[!0-9a-f]*|'') echo "digests must be 64 lowercase hex digits" >&2; exit 1 ;;
+            esac
+            test "${#digest}" -eq 64 || { echo "digests must be 64 lowercase hex digits" >&2; exit 1; }
+          done
+          case "$REF" in
+            refs/tags/v*) ;;
+            *) echo "dispatch this workflow from the release tag (refs/tags/v<version>), got $REF" >&2; exit 1 ;;
+          esac
+          echo "VERSION=${REF_NAME#v}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/check_promotion.py
+          sparse-checkout-cone-mode: false
+      - name: Fetch the rehearsal run and artifact metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" > run.json
+          gh api "repos/$REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" > artifacts.json
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: distributions
+          run-id: ${{ inputs.run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: dist/
+      - name: Check provenance and identity of the downloaded artifact
+        run: |
+          set -eu
+          python3 scripts/check_promotion.py \
+            --run-json run.json --artifacts-json artifacts.json \
+            --dist dist --upload upload --summary promotion.json \
+            --run-id "$RUN_ID" --repository "$REPOSITORY" \
+            --workflow-path "$WORKFLOW_PATH" --head-sha "$HEAD_SHA" \
+            --version "$VERSION" \
+            --wheel-sha256 "$WHEEL_SHA256" --sdist-sha256 "$SDIST_SHA256"
+          sha256sum upload/*
+      - name: Upload exactly the reviewed distributions
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: upload/
+          print-hash: true

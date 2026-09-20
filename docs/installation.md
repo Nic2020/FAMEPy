@@ -1,11 +1,35 @@
 # Installation
 
 FAMEPy is a pure-Python package (`py3-none-any` wheel) that depends on
-TimeSeriesEconPy and NumPy. It needs no compiler and bundles no FAME
-component; a separately installed, licensed FAME runtime is required only
-for the operations that call CHLI. Python 3.11 or newer on Windows or Linux
-x86-64 is the intended platform set; other platforms and Python versions are
-untested and not advertised.
+TimeSeriesEconPy (`>=0.0.1.dev3`) and NumPy (`>=1.26`). It needs no
+compiler and bundles no FAME component; a separately installed, licensed
+FAME runtime is required only for the operations that call CHLI. Python
+3.11, 3.12 and 3.13 on Windows and Linux x86-64 are the supported
+combinations: TimeSeriesEconPy publishes binary wheels for exactly those
+interpreters on `win_amd64` and `manylinux_2_28_x86_64`, so a fresh
+installation with `--only-binary=:all:` resolves without building
+anything on those six targets. TimeSeriesEconPy also ships macOS arm64
+wheels, but FAMEPy is not supported on macOS: it is untested there and no
+FAME runtime was available to test with. Other platforms and Python
+versions are likewise untested and not advertised. The native campaigns
+ran on one Windows x86-64 installation (CHLI release 11.8 file metadata,
+library version 11.83) and one Linux x86-64 installation (Red Hat
+Enterprise Linux 8, `libchli.so.2`); see [capability
+status](capabilities.md).
+
+## From an index
+
+Releases are published as `FAMEPy` by the procedure in
+[releasing](releasing.md). Once a version is on PyPI:
+
+```sh
+python -m pip install --only-binary=:all: "famepy==<version>"
+python -m famepy            # discovery report; exits 1 without FAME
+```
+
+Release candidates (`0.1.0rc1`, ...) are installed only when named
+explicitly or with `--pre`. Pin the version and record the wheel hash in
+any environment that must be reproducible.
 
 ## From a checkout
 
@@ -29,8 +53,10 @@ python -m build             # dist/famepy-<version>.tar.gz and the wheel
 
 `scripts/verify_artifacts.py` installs the built wheel and a wheel rebuilt
 from the sdist in isolated environments outside the checkout and runs the
-test suite against each; the wheel hash printed there is the identity the
-validation runner compares with the installed package.
+test suite against each; given `--wheel` and `--sdist` it verifies exactly
+those files instead (see [releasing](releasing.md)). The wheel hash printed
+there is the identity the validation runner compares with the installed
+package.
 
 ## Offline wheelhouse
 

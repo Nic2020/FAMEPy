@@ -173,7 +173,24 @@ directory (local only), from the instrumented pass. Optimizations are
 implemented only where a profile of a native run locates a bottleneck and an
 equivalence test covers the change; the package stays pure Python and adds
 no compiled extension or compiler requirement on the strength of an
-expectation. Timings from the fake backend or the C shim are never vendor
+expectation.
+
+What the accepted runs (both hosts, revision 85e46c5) locate, as inputs
+for a later revision rather than as a change made now: in the `dates`
+scenario the two conversion phases make one native call per date
+observation (each date value goes through the library's own year/period
+conversion, which is what the frequency anchors are verified against) and
+take far longer than the raw transfer of the same object, on both hosts;
+in every other scenario the native calls per phase are proportional to
+the object count, not the observation count, and no phase stands out
+against the native work it wraps. Date value conversion is therefore the
+recorded profiling candidate. A change there would have to keep the
+verified per-anchor conversion as its oracle (for example by converting
+each distinct date once, or by a batched conversion checked against the
+library's on every anchor in the `frequencies` group) and would be
+qualified by the campaign before it is relied on; the numbers themselves
+are not published as a performance claim and are not compared across the
+two hosts. Timings from the fake backend or the C shim are never vendor
 performance, and a schema-valid report is not proof of vendor performance
 either: the `vendor_timing` flag and the library identity say what was
 measured.
