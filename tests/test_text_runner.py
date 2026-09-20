@@ -92,12 +92,37 @@ def test_script_is_ascii_and_carries_the_corpus_as_escapes():
     assert "text" in validation.GROUPS and validation.REQUIRED_CASES["text"]
 
 
+def _ascii_report(report):
+    # The default JSON encoder escapes Unicode, which hides decoded-text leaks
+    # from isascii(). Inspect without escaping; hexadecimal digests remain valid.
+    text = json.dumps(report, ensure_ascii=False)
+    assert text.isascii()
+    return text
+
+
+def test_ascii_report_check_accepts_hex_digests():
+    report = {"preflight": {"abi_table_sha256": "caf" + "0" * 61}, "actual": {"ascii": "cafe"}}
+    assert json.loads(_ascii_report(report)) == report
+
+
+@pytest.mark.parametrize("value", ["caf\u00e9", "\u4e2d", "\U0001f642"])
+def test_ascii_report_check_rejects_decoded_text(value):
+    report = {"groups": {"text": {"cases": [{"actual": value}]}}}
+    assert json.dumps(report).isascii()  # Default escaping would miss the leak.
+    with pytest.raises(AssertionError):
+        _ascii_report(report)
+
+
 # -- the group with the fake backend ------------------------------------------------
 
 
-def test_text_group_passes_with_the_fake(tmp_path, child_env):
+def test_text_group_passes_with_the_fake(tmp_path, child_env, monkeypatch):
+    # A legitimate digest may contain the same letters as a text fixture.
+    digest = "caf" + "0" * 61
+    monkeypatch.setattr(validation, "abi_table_sha256", lambda: digest)
     report = validation.run(_options(tmp_path, "make_validation_backend", ["lifecycle", "text"]))
     assert report["result"] == "PASS", json.dumps(report["groups"]["text"], indent=1)[:4000]
+    assert report["preflight"]["abi_table_sha256"] == digest
     record = report["groups"]["text"]
     cases = {case["id"]: case for case in record["cases"]}
     assert set(validation.REQUIRED_CASES["text"]) <= set(cases)
@@ -110,10 +135,9 @@ def test_text_group_passes_with_the_fake(tmp_path, child_env):
     assert cases["cross_process:values:TXT_VECTOR_MISSING"]["status"] == "pass"
     assert cases["refuse_invalid_policy_no_file"]["actual"] is False
     assert cases["missing_before_decode"]["actual"] == [[0, 1, 0], True]
-    text = json.dumps(report)
+    # Corpus text must not appear decoded; unrelated hex digests are allowed.
+    text = _ascii_report(report)
     assert str(tmp_path) not in text and "Traceback" not in text
-    # Only ASCII leaves the child: corpus text never appears decoded.
-    assert text.isascii() and "caf" not in text.replace("cafe", "")
 
 
 def test_configured_julia_makes_the_text_cases_required(tmp_path, monkeypatch):
