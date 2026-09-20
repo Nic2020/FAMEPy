@@ -1,5 +1,13 @@
 # API and data contracts
 
+The public names are FAME.jl's: `init_chli`, `close_chli`, `version`,
+`check_status`, `HLIError`, `FameDatabase`, `opendb`, `workdb`, `postdb`,
+`closedb`, `FameObject`, `quick_info`, `listdb`, `do_read`, `do_write`,
+`fame`, `refame`, `unfame`, `readfame` and `writefame`. Python forces three
+adaptations: the `!` of `closedb!` and `do_read!` is dropped, the `class`
+filter keyword is `class_`, and do-block forms are context managers.
+Everything else named here is an extension without a reference spelling.
+
 ## Runtime and diagnostics
 
 Import never loads CHLI. `diagnose()` returns a dictionary with a schema
@@ -23,8 +31,9 @@ needs it for licensing.
 
 The runtime is one-shot per process. CHLI initializes once, and finalization
 is the last native call the process makes; a spawned process is the supported
-fresh-runtime boundary. `initialize()` returns the process default session
-and is idempotent while active. Exactly one session may initialize per
+fresh-runtime boundary. `init_chli()` returns the process default session
+and is idempotent while active; unlike the reference's `init_chli`, it
+never restarts the library. Exactly one session may initialize per
 process, and once any session has attempted `cfmini` no other session, no
 new wrapper over the same library and no other library candidate can
 initialize in that process: every such attempt raises `RuntimeStateError`
@@ -44,8 +53,8 @@ successful `cfmini` (for example the sentinel globals cannot be read), one
 setup error is what propagates; the
 session ends `finalized` or `broken`, never reusable. `cfmfin` is issued at
 most once per process: a failed finalization is not retried, and calling
-`finalize()` in any terminal or never-initialized state is a harmless
-Python-level no-op. `finalize()` closes tracked databases first (recording
+`close_chli()` in any terminal or never-initialized state is a harmless
+Python-level no-op. `close_chli()` closes tracked databases first (recording
 any close statuses on `last_cleanup_statuses`) and invalidates every handle;
 a handle used after finalization raises `StaleHandleError`. `generation` is 0
 before the single initialization and 1 after it.
@@ -65,7 +74,7 @@ error state are process-global inside the library, so there is no
 parallel-thread throughput promise and no public arbitrary-native-call API.
 
 `check_status(0)` returns normally; other signed 32-bit integers raise
-`FameError` with the original code. Default errors never include native text.
+`HLIError` with the original code. Default errors never include native text.
 Extended error text is opt-in: `session.enable_extended_errors()` (or an
 explicit `ExtendedErrorRetrieval` on `session.extended_error_retrieval`)
 turns it on. The session then reads the text at the failure itself, under
@@ -73,7 +82,7 @@ the same lock and before any other native call (for commands, before the
 output redirection is restored): the declared length call sizes an owned
 buffer (bounded at 64 KiB; a larger reported length is refused without
 allocating) which the declared fetch call fills and the library truncates
-to. The text is attached as `extended_text` on the raised `FameError` and
+to. The text is attached as `extended_text` on the raised `HLIError` and
 `session.extended_error_text()` returns the text captured by the most
 recent failure; it never enters an exception message, because it can carry
 private command text or identifiers. A retrieval that fails never masks the
@@ -117,7 +126,7 @@ that differ from a fixture are reported by length.
 
 ## Databases
 
-`open_database(name, mode="readonly")` accepts the seven reference modes as
+`opendb(dbname, mode="readonly")` returns a `FameDatabase`. It accepts the seven reference modes as
 integers, names or `AccessMode` members, and opens the five local ones:
 read-only, create, overwrite, update and shared. `write` and `direct_write`
 are modes of a database opened on a named server connection through a
@@ -128,20 +137,41 @@ therefore refused with `UnsupportedOperationError` before any native call,
 never remapped to another mode. The constants remain for parity with the
 reference table. Closing never posts (the package issues no post
 on close; what the library does with unposted updates on close is recorded
-by the campaign as an observation); `post()` is explicit.
+by the campaign as an observation); `postdb(db)` is explicit, and
+`closedb(db)` returns the handle as the reference's `closedb!` does.
 Closing twice is a no-op. If the native close fails, the handle stays open and
-tracked: the status propagates, `close()` can be retried, and `finalize()`
-still attempts the close and records its status. Bridge functions that
-receive a path open the database themselves, post after success and always
-close. No rollback is promised: a failure after a replacement leaves the old
+tracked: the status propagates, `closedb` can be retried, and `close_chli()`
+still attempts the close and records its status. `writefame`, `readfame`
+and `listdb` given a path open the database themselves, post after a
+successful write and always close. No rollback is promised: a failure after a replacement leaves the old
 object deleted. Mode persistence behavior is recorded by the validation
 campaign, not assumed. The work database is opened once per session and
 reopened after close. Handles never store or print the name or connection
 string.
 
-## Values
+## Objects and values
 
-`RawScalar` and `RawSeries` preserve native type, frequency, range and the
+A `FameObject(name, class_, type, freq, first_index=None, last_index=None,
+data=None)` carries what the reference's does: the name (bytes; ASCII `str`
+is encoded), the class (`series` or `scalar`), the type (a value kind or,
+for date values, the frequency of the dates), the index frequency
+(`undefined` for scalars), the range and the data. Codes are validated when
+assigned (names, codes and enumeration members are accepted; the case
+frequency is refused as a type); the data is validated against the class,
+type and range when the object is written or converted, before any native
+call. `quick_info` and `listdb` return objects without data and keep codes
+the library reported even when they are outside the package tables (a
+listing never fails on them; the derived views raise). `do_read(obj, db)`
+re-queries the metadata inside the locked read, refuses an object whose
+stored class, type or frequency no longer match (`DataValidationError`),
+reads the object's range (`None` or the NC index meaning the stored
+endpoint; an explicit endpoint must lie inside the stored range, which is
+how a subrange is read), then sets the range and an owning data buffer on
+the object and returns it; a failed read leaves the object untouched.
+`do_write(obj, db)` deletes an existing object first, as the reference does.
+Pass `replace=False` to refuse an existing name with the library's status. `unfame` refuses an object without data.
+
+The data preserves native type, frequency, range and the
 NC/NA/ND encodings *inside* a series. What the library persists for missing
 observations at the start or end of a written range is the library's
 rule, not the package's: the package adds no padding and trims nothing, a
@@ -155,8 +185,8 @@ installations, not a promise for every version.
 A namelist value is the list text the library returns (members within
 braces, separated by commas). The library documents that layout only to
 that extent and may return the same list spelled differently from what was
-written; `RawScalar.value` keeps the returned bytes untouched, and
-`namelist_members(value)` parses them into the ordered members under a
+written; the object's `data` keeps the returned bytes untouched, and
+`namelist_members(data)` parses them into the ordered members under a
 strict grammar (optional blanks around members and inside an empty list;
 no empty members, no blanks inside a member, nothing outside the braces),
 raising `DataValidationError` for anything else. Members are returned as
@@ -180,7 +210,7 @@ bytes) and buffers (dtype, byte order, contiguity, length and 64-bit range
 arithmetic). Object names are checked for their byte capacity only; whether
 a name is legal (the library reserves a number of words, such as the names
 of its data types and missing-value codes, and date-like names) is the
-library's decision, reported as `FameError` with status 25 by the object
+library's decision, reported as `HLIError` with status 25 by the object
 creation and never guessed by a shipped word list. Buffers are validated again immediately before the write, so a
 buffer or list mutated after construction is refused rather than passed on.
 An invalid input therefore makes no mutating native call and leaves existing
@@ -196,9 +226,9 @@ library exports (the first campaign observed distinct non-NaN precision
 values), and the offline tests run a synthetic finite-sentinel profile as
 well as the NaN-payload profile. Boolean missing codes are never coerced to True.
 
-`write_object(..., replace=True)` deletes an existing object first, as the
-reference does; without it the library's own status for an existing name is
-raised. The default `observed` attribute is `summed` for floating data and
+`do_write(obj, db)` defaults to `replace=True`: it deletes an existing
+object first, matching the reference. With `replace=False`, an existing
+name raises the library's own status and its stored data is preserved. The default `observed` attribute is `summed` for floating data and
 `undefined` otherwise, matching the reference; `basis` defaults to daily.
 Both accept enumeration members, their codes or their names and are
 validated by one function (`attribute_codes`) before any native call, in
@@ -206,9 +236,12 @@ every writer, so an invalid attribute never deletes or creates anything.
 
 ## Listing
 
-`list_objects` sets the ITEM options it needs inside its locked operation and
-then *normalizes* the five options it uses (`ITEM CLASS`, `ITEM TYPE`,
-`ITEM FREQUENCY`, `ITEM INDEX`, `ITEM ALIAS`) to ON. The `frequencies`
+`listdb(db, wildcard="?", alias=True, class_="", type="", freq="")` (a path
+opens read-only and closes) sets the ITEM options it needs inside its
+locked operation and then *normalizes* the five options it uses
+(`ITEM CLASS`, `ITEM TYPE`, `ITEM FREQUENCY`, `ITEM INDEX`, `ITEM ALIAS`)
+to ON. The filters take the reference's comma-separated strings or Python
+sequences (`""` and `None` mean no filter). The `freq`
 filter accepts exact frequency names or codes from the frequency table (a
 family word such as `quarterly` is refused with `ValueError`) and is
 enforced on the metadata of the listed objects: an object is returned only
@@ -232,11 +265,13 @@ propagates.
 
 ## Bridge
 
-The bridge converts between Python/TimeSeriesEconPy values and raw objects
-(`bridge.to_fame`, `bridge.from_fame`), reads and writes single objects
-(`read_value`, `write_value`, and the typed `read_tseries`, `write_tseries`,
-`read_scalar`, `write_scalar`) and whole workspaces (`read_workspace`,
-`write_workspace`, `read_workspace_report`, `write_workspace_report`). It
+`refame(name, value)` converts a Python/TimeSeriesEconPy value into a
+`FameObject` ready for `do_write`; `unfame(obj)` converts an object read
+with `do_read` back into a value; `readfame` and `writefame` do the same
+for whole workspaces, with `bridge.readfame_report` and
+`bridge.writefame_report` as the per-object contained variants. A single
+object is read as `unfame(do_read(quick_info(db, name), db))` and written
+as `do_write(refame(name, value), db)`, as in the reference. The bridge
 uses TimeSeriesEconPy's public API only.
 
 ### Representation
@@ -274,13 +309,17 @@ Deliberate differences from the reference, each covered by tests:
   returns a bare vector.
 - A missing Boolean observation raises `MissingValueError`; the reference
   reads it as `True`. A missing date reads as `None`; it is never an integer.
-- Existing objects are replaced by default in workspace writes (as the
-  reference does); the single-object functions default to `replace=False`.
+- Existing objects are replaced by default by `writefame` (as the
+  reference does); `do_write` also defaults to `replace=True`; `replace=False` is the opt-out.
 - Wildcard matches are ordered by name bytes and the same object matched
   twice is read once; the reference follows the library's cursor order and
   reads duplicates twice.
-- `write_workspace` with a path requires an explicit `mode`; the reference
+- `writefame` with a path requires an explicit `mode`; the reference
   defaults to overwrite.
+- `readfame` and `writefame` raise at the first object that cannot be
+  read, converted or written; the reference logs the failure and skips the
+  object. `bridge.readfame_report` and `bridge.writefame_report` contain
+  failures per object instead.
 - A case moment (`MIT` of `Unit`) is refused as a date *value* with
   `DataValidationError`: as a scalar, as a `DateSeries` observation and as
   the `value_frequency` of an empty or all-missing `DateSeries`. The
@@ -299,9 +338,8 @@ Monday to Friday), `Weekly(end_day)` for all seven endings, `Monthly`,
 `HalfYearly(1..6)` (july..december) and `Yearly(1..12)` (january..december).
 Supported date *value* frequencies are the same set without `Unit`: the
 case frequency is never a value type (see the differences above), and the
-raw layer refuses it in the same way (`famepy.scalar`/`famepy.series` with
-`date_frequency="case"`, `RawScalar`/`RawSeries`, `type_code("case")`),
-before any native call.
+object model refuses it in the same way (a `FameObject` typed by the case
+frequency, `type_code("case")`), before any native call.
 The library names quarterly and half-yearly frequencies by one of their
 equivalent ending months; the maps are the reference's. Ten-day, biweekly,
 twice-monthly, bimonthly, ypp, ppy, intraday, weekly-pattern and undefined
@@ -353,10 +391,8 @@ refused, never replaced). `bytes` input is written as given under every
 policy, an embedded NUL is refused under every policy, and the policy is
 validated with the other policies before any path is opened. The policy
 applies to string scalars, the `Text` carrier, `StringSeries` observations
-and plain string vectors on `to_fame`, `from_fame`, the single-object
-readers and writers (`read_value`, `read_scalar`, `write_value`,
-`write_scalar`) and the workspace readers and writers, including the
-`*_report` variants, where a value the policy cannot encode is one
+and plain string vectors on `refame`, `unfame`, `readfame` and `writefame`,
+including the `*_report` variants, where a value the policy cannot encode is one
 contained failure. Object names and namelist members are not values and
 stay ASCII under every policy, so a `str` shaped `{...}` with a non-ASCII
 member is still a namelist with an invalid member, while `Text` of the same
@@ -381,9 +417,11 @@ never post.
 
 Reading: positional names are explicit names or wildcard patterns (`?`
 any run, `^` one character); with none, everything (`?`) is read. Wildcards
-are expanded with `list_objects` and the `alias`, `classes`, `types` and
-`frequencies` filters; explicit names are looked up whatever their class or
-frequency, and an absent explicit name raises the library's status. Names
+are expanded with `listdb` and the `alias`, `class_`, `type` and `freq`
+filters; explicit names are looked up with `quick_info` whatever their
+class or frequency, and an absent explicit name raises the library's
+status. Each resolved object is then read with `do_read` and converted
+with `unfame`. Names
 are transformed in order: the `prefix` (joined by `glue`, compared
 upper-cased) is stripped from the start when present; `collect` entries (a
 name, a `(name, nested)` pair whose second element is a list, tuple or
@@ -406,19 +444,19 @@ value and a nested workspace, raise `NameCollisionError` and nothing is
 read. Explicit names keep their argument order; wildcard matches are ordered
 by name bytes.
 
-`read_workspace` raises at the first failure. `read_workspace_report`
+`readfame` raises at the first failure. `bridge.readfame_report`
 contains per-object read and conversion failures and returns a `ReadReport`
 with the partial `workspace`, the `failures` (`ObjectFailure`: FAME name,
 key path, the exception, its class name and numeric status; never library
 text) and `complete`. With `raw_fallback=True` an object the bridge cannot
 represent (unsupported frequency, missing Boolean, truly empty series,
-non-ASCII text, malformed name-list) is stored as its `RawScalar` /
-`RawSeries` and listed in `raw`; native read failures are never replaced by
-a carrier. Name resolution and collisions stay strict in both variants,
+non-ASCII text, malformed name-list) is stored as its `FameObject`, data
+read but not converted, and listed in `raw`; native read failures are
+never replaced by an object. Name resolution and collisions stay strict in both variants,
 and the `text` policy of a read applies to every string value it converts.
 
 Writing: workspaces, mappings and multivariate series (each argument, any
-number of them) are flattened recursively by joining names with `glue`; an
+number of them, or one tuple of them as the reference accepts) are flattened recursively by joining names with `glue`; an
 optional `prefix` is prepended to every top-level name (`prefix=""` still
 adds the glue, `prefix=None` adds nothing). A cycle raises
 `WorkspaceCycleError`; a non-string key `TypeError`; an invalid name
@@ -428,11 +466,11 @@ adds the glue, `prefix=None` adds nothing). A cycle raises
 happen before the destination is opened and before the first create,
 replace or delete, so an invalid input never creates, truncates or opens a
 file and never mutates an open handle. With nothing to write (empty
-inputs) the destination is not opened at all: `write_workspace` returns
+inputs) the destination is not opened at all: `writefame` returns
 `()` and the report variant an empty, complete, unposted report; creating
-an empty database is `open_database`'s job. `write_workspace` returns the
+an empty database is `opendb`'s job. `writefame` returns the
 FAME names written and raises at the first native failure (a path target
-is then closed without posting). `write_workspace_report` keeps
+is then closed without posting). `bridge.writefame_report` keeps
 flattening, names, collisions, cycles and the options strict, contains an
 invalid value, a failed conversion or a native failure per object, opens
 the destination only when at least one object converted (when every
@@ -446,9 +484,11 @@ series per column and are not reconstructed on read.
 
 ## Commands
 
-`run_command` redirects output to a temporary file with a literal
+`fame(command)` redirects output to a temporary file with a literal
 `output file("...!")`, executes, restores `output terminal` and removes the
-file, whether or not the command fails. The file name is fresh inside a
+file, whether or not the command fails, and returns the captured bytes
+(the reference prints them; `output=` takes a binary stream as its
+`fame(io, command)` form does, and there is no string-macro form). The file name is fresh inside a
 private directory created for the call and the file itself is created by
 the library, never pre-created by the package. `CommandError` carries the
 status, the failing `stage` (`redirect`, `command` or `restore`) and any

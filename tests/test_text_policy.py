@@ -7,10 +7,11 @@ round trips compare against independent data, not against the codec.
 """
 
 import pytest
+from canonical import read, scalar_object, series_object, value, write
 from tsecon import mm
 
 import famepy
-from famepy import DataValidationError, TextEncodingError, bridge, migration
+from famepy import TextEncodingError, bridge, migration
 from famepy._constants import FREQUENCY_CASE
 from famepy._text import (
     VALUE_TEXT_POLICIES,
@@ -122,123 +123,124 @@ def test_names_paths_and_commands_keep_their_boundary():
 def test_scalar_round_trip_under_utf8(db, label, case):
     text, expected_hex = case
     expected = bytes.fromhex(expected_hex)
-    bridge.write_value(db, "s", text, text="utf-8")
-    raw = famepy.read_object(db, "s")
-    assert raw.kind == "string" and raw.value == expected
-    assert bridge.read_value(db, "s", text="utf-8") == text
-    assert bridge.read_scalar(db, "s", text="utf-8") == text
-    assert bridge.read_value(db, "s", text="bytes") == expected
+    write(db, "s", text, text="utf-8")
+    raw = read(db, "s")
+    assert raw.kind == "string" and raw.data == expected
+    assert value(db, "s", text="utf-8") == text
+    assert value(db, "s", text="utf-8") == text
+    assert value(db, "s", text="bytes") == expected
     if text.isascii():
-        assert bridge.read_value(db, "s") == text
+        assert value(db, "s") == text
     else:
         with pytest.raises(TextEncodingError):
-            bridge.read_value(db, "s")
+            value(db, "s")
         with pytest.raises(TextEncodingError):
-            bridge.write_value(db, "t", text)
+            write(db, "t", text)
         with pytest.raises(TextEncodingError):
-            bridge.write_value(db, "t", text, text="bytes")
+            write(db, "t", text, text="bytes")
     # The whole stored byte sequence is decoded: a terminal multibyte
     # character is not a problem for the package (a wrapper that slices by
     # the byte length would fail on "terminal", "cjk" and "supplementary").
-    assert bridge.from_fame(raw, database=db, text="utf-8") == text
+    assert famepy.unfame(raw, database=db, text="utf-8") == text
 
 
-def test_to_fame_from_fame_take_the_policy(session):
-    raw = bridge.to_fame(ACCENT, session=session, text="utf-8")
-    assert raw.value == b"caf\xc3\xa9"
+def test_refame_unfame_take_the_policy(session):
+    obj = famepy.refame("s", ACCENT, session=session, text="utf-8")
+    assert obj.data == b"caf\xc3\xa9"
     with pytest.raises(TextEncodingError):
-        bridge.to_fame(ACCENT, session=session)
+        famepy.refame("s", ACCENT, session=session)
     with pytest.raises(ValueError, match="text must be"):
-        bridge.to_fame(ACCENT, session=session, text="latin-1")
+        famepy.refame("s", ACCENT, session=session, text="latin-1")
     bridge.validate_value(ACCENT, text="utf-8")
     with pytest.raises(TextEncodingError):
         bridge.validate_value(ACCENT)
-    assert bridge.from_fame(raw, session=session, text="utf-8") == ACCENT
-    assert bridge.from_fame(raw, session=session, text="bytes") == b"caf\xc3\xa9"
+    assert famepy.unfame(obj, session=session, text="utf-8") == ACCENT
+    assert famepy.unfame(obj, session=session, text="bytes") == b"caf\xc3\xa9"
     with pytest.raises(TextEncodingError):
-        bridge.from_fame(raw, session=session)
+        famepy.unfame(obj, session=session)
 
 
 def test_carriers_and_vectors_under_utf8(db):
-    bridge.write_value(db, "t", Text("{caf\xe9}"), text="utf-8")
+    write(db, "t", Text("{caf\xe9}"), text="utf-8")
     assert famepy.quick_info(db, "t").kind == "string"
-    assert famepy.read_object(db, "t").value == b"{caf\xc3\xa9}"
-    assert bridge.read_value(db, "t", text="utf-8") == "{caf\xe9}"
+    assert read(db, "t").data == b"{caf\xc3\xa9}"
+    assert value(db, "t", text="utf-8") == "{caf\xe9}"
     # Literal braces without the carrier are a namelist under every policy,
     # and namelist members stay printable ASCII: no policy widens names.
     with pytest.raises(ValueError, match="printable ASCII"):
-        bridge.write_value(db, "n", "{caf\xe9}", text="utf-8")
+        write(db, "n", "{caf\xe9}", text="utf-8")
     with pytest.raises(ValueError, match="printable ASCII"):
         NameList(["caf\xe9"])
-    bridge.write_value(db, "n", "{a,b}", text="utf-8")
-    assert bridge.read_value(db, "n", text="utf-8") == NameList(["A", "B"])
+    write(db, "n", "{a,b}", text="utf-8")
+    assert value(db, "n", text="utf-8") == NameList(["A", "B"])
 
-    bridge.write_value(db, "v", ["alpha", ACCENT, CJK], text="utf-8")
-    raw = famepy.read_object(db, "v")
+    write(db, "v", ["alpha", ACCENT, CJK], text="utf-8")
+    raw = read(db, "v")
     assert raw.frequency == FREQUENCY_CASE and raw.first_index == 1
-    assert raw.values == [b"alpha", b"caf\xc3\xa9", bytes.fromhex("e697a5e69cace8aa9e")]
-    back = bridge.read_value(db, "v", text="utf-8")
+    assert raw.data == [b"alpha", b"caf\xc3\xa9", bytes.fromhex("e697a5e69cace8aa9e")]
+    back = value(db, "v", text="utf-8")
     assert isinstance(back, StringSeries) and back.values == ("alpha", ACCENT, CJK)
-    assert bridge.read_value(db, "v", text="bytes").values == tuple(raw.values)
+    assert value(db, "v", text="bytes").values == tuple(raw.data)
     with pytest.raises(TextEncodingError):
-        bridge.read_value(db, "v")
+        value(db, "v")
     with pytest.raises(TextEncodingError):
-        bridge.write_value(db, "w", ("alpha", ACCENT))
+        write(db, "w", ("alpha", ACCENT))
     with pytest.raises(TextEncodingError):
-        bridge.write_value(db, "w", ["alpha", "\ud800"], text="utf-8")
+        write(db, "w", ["alpha", "\ud800"], text="utf-8")
 
     series = StringSeries(mm(2020, 1), [ACCENT, None, "", b"raw\xff"])
-    bridge.write_value(db, "d", series, text="utf-8")
-    raw = famepy.read_object(db, "d")
-    codes = famepy.classify_by_sentinel(raw.values, "string", db.session.sentinels).tolist()
+    write(db, "d", series, text="utf-8")
+    raw = read(db, "d")
+    codes = famepy.classify_by_sentinel(raw.data, "string", db.session.sentinels).tolist()
     assert codes == [0, 1, 0, 0]
-    assert raw.values[0] == b"caf\xc3\xa9" and raw.values[2] == b"" and raw.values[3] == b"raw\xff"
+    assert raw.data[0] == b"caf\xc3\xa9" and raw.data[2] == b"" and raw.data[3] == b"raw\xff"
     # The missing observation is classified before any decoding; the raw
     # byte observation makes the strict decode fail as a whole.
     with pytest.raises(TextEncodingError):
-        bridge.read_value(db, "d", text="utf-8")
-    assert bridge.read_value(db, "d", text="bytes").values == (
+        value(db, "d", text="utf-8")
+    assert value(db, "d", text="bytes").values == (
         b"caf\xc3\xa9",
         None,
         b"",
         b"raw\xff",
     )
-    bridge.write_value(db, "e", StringSeries(mm(2020, 1), [ACCENT, None, ""]), text="utf-8")
-    assert bridge.read_value(db, "e", text="utf-8").values == (ACCENT, None, "")
+    write(db, "e", StringSeries(mm(2020, 1), [ACCENT, None, ""]), text="utf-8")
+    assert value(db, "e", text="utf-8").values == (ACCENT, None, "")
     with pytest.raises(bridge.MissingValueError):
-        bridge.read_value(db, "e", text="utf-8", missing="strict")
+        value(db, "e", text="utf-8", missing="strict")
 
 
 def test_sentinels_are_never_decoded(db):
     sentinels = db.session.sentinels
-    raw = famepy.series(
+    raw = series_object(
+        "m",
         "string",
         FREQUENCY_CASE,
         1,
         [sentinels.string_nc, sentinels.string_na, sentinels.string_nd],
     )
-    famepy.write_object(db, "m", raw)
-    assert bridge.read_value(db, "m", text="utf-8").values == (None, None, None)
-    assert bridge.read_value(db, "m").values == (None, None, None)
-    famepy.write_object(db, "ms", famepy.scalar("string", sentinels.string_nc))
-    assert bridge.read_value(db, "ms", text="utf-8") is None
+    famepy.do_write(raw, db)
+    assert value(db, "m", text="utf-8").values == (None, None, None)
+    assert value(db, "m").values == (None, None, None)
+    famepy.do_write(scalar_object("ms", "string", sentinels.string_nc), db)
+    assert value(db, "ms", text="utf-8") is None
 
 
 def test_invalid_stored_bytes_are_refused_not_replaced(db):
-    famepy.write_object(db, "s", famepy.scalar("string", b"caf\xe9"))
+    famepy.do_write(scalar_object("s", "string", b"caf\xe9"), db)
     with pytest.raises(TextEncodingError):
-        bridge.read_value(db, "s", text="utf-8")
+        value(db, "s", text="utf-8")
     with pytest.raises(TextEncodingError):
-        bridge.read_value(db, "s")
-    assert bridge.read_value(db, "s", text="bytes") == b"caf\xe9"
+        value(db, "s")
+    assert value(db, "s", text="bytes") == b"caf\xe9"
 
 
 def test_names_take_no_policy(db):
     for policy in VALUE_TEXT_POLICIES:
         with pytest.raises(TextEncodingError):
-            bridge.write_value(db, "caf\xe9", "x", text=policy)
+            write(db, "caf\xe9", "x", text=policy)
     with pytest.raises(TextEncodingError):
-        bridge.write_workspace(db, {"caf\xe9": "x"}, text="utf-8")
+        famepy.writefame(db, {"caf\xe9": "x"}, text="utf-8")
 
 
 # -- validation before any destructive open --------------------------------------
@@ -247,34 +249,33 @@ def test_names_take_no_policy(db):
 def test_policy_and_encoding_failures_precede_the_path_open(session, tmp_path):
     fake = session._native.fake
     path = tmp_path / "t.db"
-    bridge.write_value(path, "keep", 1.0, mode="create")
-    before = famepy.read_object
+    write(path, "keep", 1.0, mode="create")
     fake.calls.clear()
     with pytest.raises(ValueError, match="text must be"):
-        bridge.write_value(path, "x", "text", mode="overwrite", text="latin-1")
+        write(path, "x", "text", mode="overwrite", text="latin-1")
     with pytest.raises(TextEncodingError):
-        bridge.write_value(path, "x", ACCENT, mode="overwrite")
+        write(path, "x", ACCENT, mode="overwrite")
     with pytest.raises(TextEncodingError):
-        bridge.write_value(path, "x", "\ud800", mode="overwrite", text="utf-8")
+        write(path, "x", "\ud800", mode="overwrite", text="utf-8")
     with pytest.raises(TextEncodingError):
-        bridge.write_scalar(path, "x", ACCENT, mode="overwrite", text="bytes")
+        write(path, "x", ACCENT, mode="overwrite", text="bytes")
     with pytest.raises(ValueError, match="text must be"):
-        bridge.write_workspace(path, {"x": "text"}, mode="overwrite", text="utf8")
+        famepy.writefame(path, {"x": "text"}, mode="overwrite", text="utf8")
     with pytest.raises(TextEncodingError):
-        bridge.write_workspace(path, {"x": ACCENT}, mode="overwrite")
+        famepy.writefame(path, {"x": ACCENT}, mode="overwrite")
     with pytest.raises(ValueError, match="text must be"):
-        bridge.write_workspace_report(path, {"x": "text"}, mode="overwrite", text="utf8")
+        bridge.writefame_report(path, {"x": "text"}, mode="overwrite", text="utf8")
     with pytest.raises(ValueError, match="text must be"):
-        bridge.read_value(path, "keep", text="utf8")
+        value(path, "keep", text="utf8")
     with pytest.raises(ValueError, match="text must be"):
-        bridge.read_workspace(path, text="utf8")
+        famepy.readfame(path, text="utf8")
     with pytest.raises(ValueError, match="text must be"):
-        bridge.read_workspace_report(path, text="utf8")
+        bridge.readfame_report(path, text="utf8")
     assert fake.calls == []
-    assert bridge.read_value(path, "keep") == 1.0 and before is famepy.read_object
+    assert value(path, "keep") == 1.0
     absent = tmp_path / "never.db"
     with pytest.raises(TextEncodingError):
-        bridge.write_value(absent, "x", ACCENT, mode="create")
+        write(absent, "x", ACCENT, mode="create")
     assert not absent.exists()
 
 
@@ -284,29 +285,29 @@ def test_policy_and_encoding_failures_precede_the_path_open(session, tmp_path):
 def test_workspace_writes_read_and_contain_under_utf8(session, tmp_path):
     path = tmp_path / "w.db"
     data = {"ok": INTERNAL, "vec": [ACCENT, "b"], "plain": "plain"}
-    names = bridge.write_workspace(path, data, mode="create", text="utf-8")
+    names = famepy.writefame(path, data, mode="create", text="utf-8")
     assert names == ("ok", "vec", "plain")
-    with famepy.open_database(path, session=session) as db:
-        assert famepy.read_object(db, "OK").value == bytes.fromhex("636166c3a9206175206c616974")
-    read = bridge.read_workspace(path, text="utf-8")
-    assert read.ok == INTERNAL and read.vec.values == (ACCENT, "b") and read.plain == "plain"
+    with famepy.opendb(path, session=session) as db:
+        assert read(db, "OK").data == bytes.fromhex("636166c3a9206175206c616974")
+    back = famepy.readfame(path, text="utf-8")
+    assert back.ok == INTERNAL and back.vec.values == (ACCENT, "b") and back.plain == "plain"
     with pytest.raises(TextEncodingError):
-        bridge.read_workspace(path)
+        famepy.readfame(path)
     with pytest.raises(TextEncodingError):
-        bridge.write_workspace(path, data, mode="update")
+        famepy.writefame(path, data, mode="update")
 
-    report = bridge.read_workspace_report(path)
+    report = bridge.readfame_report(path)
     assert not report.complete and list(report.workspace) == ["plain"]
     assert sorted((f.name, f.error_type, f.status) for f in report.failures) == [
         ("OK", "TextEncodingError", None),
         ("VEC", "TextEncodingError", None),
     ]
-    fallback = bridge.read_workspace_report(path, raw_fallback=True)
+    fallback = bridge.readfame_report(path, raw_fallback=True)
     assert fallback.complete and fallback.raw == ("OK", "VEC")
-    assert fallback.workspace.ok.value == bytes.fromhex("636166c3a9206175206c616974")
-    assert bridge.read_workspace_report(path, text="utf-8").complete
+    assert fallback.workspace.ok.data == bytes.fromhex("636166c3a9206175206c616974")
+    assert bridge.readfame_report(path, text="utf-8").complete
 
-    contained = bridge.write_workspace_report(
+    contained = bridge.writefame_report(
         path, {"good": ACCENT, "bad": "\ud800", "nul": "a\0b"}, mode="update", text="utf-8"
     )
     assert contained.written == ("good",) and contained.posted
@@ -314,8 +315,8 @@ def test_workspace_writes_read_and_contain_under_utf8(session, tmp_path):
         ("bad", "TextEncodingError"),
         ("nul", "TextEncodingError"),
     ]
-    assert bridge.read_value(path, "good", text="utf-8") == ACCENT
-    nothing = bridge.write_workspace_report(
+    assert value(path, "good", text="utf-8") == ACCENT
+    nothing = bridge.writefame_report(
         tmp_path / "unopened.db", {"bad": "\ud800"}, mode="create", text="utf-8"
     )
     assert nothing.written == () and not nothing.posted and not (tmp_path / "unopened.db").exists()
@@ -328,10 +329,10 @@ def test_workspace_writes_read_and_contain_under_utf8(session, tmp_path):
 def test_migration_does_not_take_the_utf8_policy(session, tmp_path):
     """A UTF-8 string written under the policy is a contained migration failure."""
     source = tmp_path / "t.db"
-    with famepy.open_database(source, "create", session=session) as db:
-        bridge.write_value(db, "accent", ACCENT, text="utf-8")
-        bridge.write_value(db, "plain", "plain")
-        db.post()
+    with famepy.opendb(source, "create", session=session) as db:
+        write(db, "accent", ACCENT, text="utf-8")
+        write(db, "plain", "plain")
+        famepy.postdb(db)
     report = migration.migrate(source, tmp_path / "t.daec", session=session)
     outcomes = {e.name: (e.action, e.error_type) for e in report.entries}
     assert outcomes == {"ACCENT": ("failed", "TextEncodingError"), "PLAIN": ("stored", None)}
@@ -339,7 +340,8 @@ def test_migration_does_not_take_the_utf8_policy(session, tmp_path):
         migration.MigrationOptions(text="utf-8")
 
 
-def test_read_helpers_reject_series_and_scalars_consistently(db):
-    bridge.write_value(db, "s", ACCENT, text="utf-8")
-    with pytest.raises(DataValidationError):
-        bridge.read_tseries(db, "s")
+def test_default_policy_refuses_a_utf8_value_on_read(db):
+    write(db, "s", ACCENT, text="utf-8")
+    with pytest.raises(TextEncodingError):
+        value(db, "s")
+    assert value(db, "s", text="utf-8") == ACCENT

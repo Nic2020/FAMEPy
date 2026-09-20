@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import famepy
-from famepy import DataValidationError, RangeSpec, TextEncodingError, from_native, to_native
+from famepy import DataValidationError, FameRange, TextEncodingError, from_native, to_native
 from famepy._abi import GLOBAL_TYPES, GLOBALS, PI, PRESENCE_ONLY, SIGNATURES
 from famepy._constants import (
     FREQUENCIES,
@@ -57,20 +57,20 @@ def test_frequency_tables():
 
 
 def test_range_spec_validation():
-    spec = RangeSpec(129, 5, 9)
+    spec = FameRange(129, 5, 9)
     assert spec.length == 5
     native = spec.to_ctypes()
     assert (native.frequency, native.start, native.end) == (129, 5, 9)
     with pytest.raises(DataValidationError):
-        RangeSpec(129, 9, 5)
+        FameRange(129, 9, 5)
     with pytest.raises(DataValidationError):
-        RangeSpec(129, 0, MAX_OBSERVATIONS)
+        FameRange(129, 0, MAX_OBSERVATIONS)
     with pytest.raises(DataValidationError):
-        RangeSpec(129, 2**63, 2**63)
+        FameRange(129, 2**63, 2**63)
     with pytest.raises(DataValidationError):
-        RangeSpec(-1, 0, 0)
+        FameRange(-1, 0, 0)
     with pytest.raises(DataValidationError):
-        RangeSpec(129, True, 1)
+        FameRange(129, True, 1)
 
 
 def test_check_buffer_rules():
@@ -99,12 +99,12 @@ def test_abi_inventory_is_complete():
 
 def test_status_messages_include_known_codes():
     for status in (13, 18, 67, 97, 98, 513):
-        assert str(status) in str(famepy.FameError(status))
-    error = famepy.FameError(5, operation="cfmopdb")
+        assert str(status) in str(famepy.HLIError(status))
+    error = famepy.HLIError(5, operation="cfmopdb")
     assert "cfmopdb" in str(error) and error.operation == "cfmopdb"
 
 
 def test_public_surface_exports_are_importable():
     for name in famepy.__all__:
         assert getattr(famepy, name) is not None
-    assert famepy.__version__ == "0.1.0rc1"
+    assert famepy.__version__ == "0.1.0rc2"

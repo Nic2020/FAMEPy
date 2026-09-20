@@ -21,7 +21,7 @@ class AccessMode(enum.IntEnum):
     Only the first five are local modes of the database open the package
     binds. ``WRITE`` and ``DIRECT_WRITE`` are modes of a database opened on
     a named server connection, an API neither the package nor the reference
-    binds; they are kept for parity and refused by ``open_database``.
+    binds; they are kept for parity and refused by ``opendb``.
     """
 
     READONLY = 1

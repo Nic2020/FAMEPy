@@ -106,7 +106,7 @@ def test_measure_separates_timed_passes_from_the_instrumented_pass(tmp_path):
     assert session._native is original
     phases = record["phases"]
     assert len(phases["write_raw"]["seconds"]["samples"]) == 2
-    assert phases["write_raw"]["native_calls"] == 40  # create plus write per object
+    assert phases["write_raw"]["native_calls"] == 60  # delete, create, write per object
     assert phases["post"]["native_calls"] == 1
     assert record["memory"]["tracemalloc_peak_bytes"] > 0 and record["verified"] is True
     assert set(record) == {
@@ -223,7 +223,7 @@ def test_harness_reports_phases_sizes_identity_and_honesty_flags(tmp_path, child
         assert len(record["seconds"]["samples"]) == 2
         assert record["seconds"]["min"] <= record["seconds"]["median"] <= record["seconds"]["max"]
         assert isinstance(record["native_calls"], int)
-    assert phases["write_raw"]["native_calls"] == 40
+    assert phases["write_raw"]["native_calls"] == 60
     assert many["memory"]["tracemalloc_peak_bytes"] > 0
     assert many["memory"]["scope"] == benchmarks.MEMORY_SCOPE
     density = warm["missing_density"]["phases"]
@@ -312,7 +312,7 @@ def test_timeout_terminates_a_hanging_worker_and_fails_the_run(tmp_path, child_e
 def test_backend_failure_and_corrupted_reads_cannot_yield_timings(tmp_path, child_env):
     report = benchmarks.run(_options(tmp_path, "make_failing_backend"))
     record = report["warm"]["many_small"]
-    assert record["error"] == "backend_setup_failed" and record["error_type"] == "FameError"
+    assert record["error"] == "backend_setup_failed" and record["error_type"] == "HLIError"
     assert record["status"] == 97 and record["operation"] == "initialize"
     assert "phase" not in record and report["result"] == "incomplete"
     report = benchmarks.run(_options(tmp_path / "c", "make_benchmark_corrupting_backend"))
@@ -775,7 +775,7 @@ def test_scenario_failure_records_status_operation_and_phase(tmp_path, child_env
     record = report["warm"]["missing_density"]
     assert record == {
         "error": "scenario_failed",
-        "error_type": "FameError",
+        "error_type": "HLIError",
         "status": 9,
         "operation": "write_precisions",
         "phase": "write_density_00",
@@ -787,19 +787,19 @@ def test_scenario_failure_records_status_operation_and_phase(tmp_path, child_env
 
 
 def test_failure_record_is_bounded_and_names_the_phase():
-    from famepy._errors import FameError
+    from famepy._errors import HLIError
 
     scenario = benchmarks.build_scenarios(benchmarks.SCALES["small"], ["many_small"])[0]
     timer = benchmarks.Timer()
     try:
         with timer.phase("write_raw"):
-            raise FameError(9, operation="write_precisions")
-    except FameError as error:
+            raise HLIError(9, operation="write_precisions")
+    except HLIError as error:
         record = benchmarks.failure_record(error, "many_small", "warm")
     assert record == {
         "scenario": "many_small",
         "mode": "warm",
-        "error_type": "FameError",
+        "error_type": "HLIError",
         "status": 9,
         "operation": "write_precisions",
         "phase": "write_raw",
@@ -844,13 +844,13 @@ def test_injected_failure_fields_are_rejected(change):
         "mode": "warm",
         "token": "t",
         "complete": True,
-        "error_type": "FameError",
+        "error_type": "HLIError",
         "status": 9,
         "operation": "write_precisions",
         "phase": "write_raw",
     }
     assert benchmarks.failure_diagnostics(record, scenario, "warm") == {
-        "error_type": "FameError",
+        "error_type": "HLIError",
         "status": 9,
         "operation": "write_precisions",
         "phase": "write_raw",
@@ -865,7 +865,7 @@ def test_worker_failure_gates_keep_diagnostics_out_of_timings(tmp_path, monkeypa
     forged = {
         "scenario": "many_small",
         "mode": "warm",
-        "error_type": "FameError",
+        "error_type": "HLIError",
         "status": 9,
         "operation": "write_precisions",
         "phase": "write_raw",
@@ -922,7 +922,7 @@ def _julia_accepted(**changes):
 def test_comparison_lists_only_completed_verified_pairs():
     scenarios = benchmarks.build_scenarios(benchmarks.SCALES["small"], None)
     ok = {"phases": {}}
-    failed = {"error": "scenario_failed", "error_type": "FameError", "status": 9}
+    failed = {"error": "scenario_failed", "error_type": "HLIError", "status": 9}
     warm = {"many_small": ok, "few_large": failed, "dates": ok, "strings": ok, "migration": ok}
     # No Julia: candidates only.
     comparison = benchmarks.comparison_report(_report(warm), scenarios, None)

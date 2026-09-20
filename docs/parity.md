@@ -17,13 +17,52 @@ reading only).
 "extension" means something the reference does not offer; "gap" means not
 implemented.
 
+## Names
+
+The Python names are the reference's. The reference exports `version`,
+`check_status`, `FameDatabase`, `fame`, `@fame_str`, `workdb`, `opendb`,
+`postdb`, `closedb!`, `FameObject`, `quick_info`, `listdb`, `do_read!`,
+`do_write`, `readfame`, `unfame`, `writefame` and `refame`; it defines
+`init_chli`, `close_chli`, `HLIError`, `FameRange`, `Period`, `FameIndex`
+and `FameDate` as qualified names. Python cannot spell `closedb!`,
+`do_read!`, `@fame_str`, a `class` keyword argument or a do-block, so
+those become `closedb`, `do_read`, a call of `fame`, `class_` and a
+context manager; `FameIndex` and `FameDate` are plain integers. Every
+other name in the package (the code tables, `Session`, `delete_object`,
+the missing-value helpers, the carriers and policies in `famepy.bridge`,
+`famepy.migration`, `famepy.validation`, `famepy.benchmarks`) is an
+extension and is named as such below.
+
+### Signatures changed since 0.1.0rc1
+
+The first candidate used Python-descriptive names; 0.1.0rc2 replaces them
+with the reference's, without aliases. The native evidence cited in this
+ledger was recorded under the old names at the revisions given; the
+storage, conversion and ABI code behind them did not change, the object
+model did (one `FameObject` in place of the metadata record and the raw
+carriers), and the renamed surface has offline coverage only until the
+next campaign.
+
+| 0.1.0rc1 | 0.1.0rc2 | What else changed |
+|---|---|---|
+| `initialize()`, `finalize()`, `FameError`, `RangeSpec` | `init_chli()`, `close_chli()`, `HLIError`, `FameRange` | names only |
+| `Database`, `open_database`, `work_database`, `db.post()`, `db.close()` | `FameDatabase`, `opendb`, `workdb`, `postdb(db)`, `closedb(db)` | functions instead of methods; `closedb` returns the handle |
+| `ObjectInfo`, `RawScalar`, `RawSeries`, `scalar()`, `series()` | `FameObject(name, class_, type, freq, first_index, last_index, data)` | one mutable object with the name, metadata and data; a date value's type is its frequency; validation of the data moves to `do_write`/`unfame` (still before any native call) |
+| `read_object(db, name, first_index=, last_index=)` | `do_read(obj, db)` | the object's range selects the subrange; class, type and frequency must still match the stored object |
+| `write_object(db, name, raw, replace=, basis=, observed=)` | `do_write(obj, db, replace=, basis=, observed=)` | name and data travel on the object; replacement now defaults to true, matching the reference |
+| `list_objects(db, pattern, alias=, classes=, types=, frequencies=, capacity=)` | `listdb(db, wildcard, alias=, class_=, type=, freq=, capacity=)` | a path opens read-only; returns `FameObject` entries |
+| `run_command(command, ...)` | `fame(command, ...)` | name only |
+| `bridge.to_fame(value, ...)`, `bridge.from_fame(raw, ...)` | `refame(name, value, ...)`, `unfame(obj, ...)` | the reference's argument order; the name is validated first |
+| `bridge.read_workspace`, `bridge.write_workspace`, `*_report` | `readfame`, `writefame`, `bridge.readfame_report`, `bridge.writefame_report` | filter keywords `class_`, `type`, `freq`; `writefame` also takes one tuple of workspaces |
+| `bridge.read_value`, `write_value`, `read_tseries`, `write_tseries`, `read_scalar`, `write_scalar`, `from_tseries`, `to_tseries`, `raw_kind` | removed | `unfame(do_read(quick_info(db, name), db))` and `do_write(refame(name, value), db)`, as in the reference |
+
 ## Runtime and status
 
 | Reference | Python | Class | Evidence |
 |---|---|---|---|
 | `version` | `famepy.version()` | parity | native (both hosts) |
-| `init_chli`, `close_chli` | `initialize()`, `finalize()`; `reset()` refuses | difference: one-shot per process, finalization terminal, no restart | native: every restart route rejected, fresh process verified |
-| `check_status`, `HLIError` | `check_status`, `FameError` with numeric status | parity; no vendor text by default | native through every failing case |
+| `init_chli`, `close_chli` | `init_chli()`, `close_chli()`; `reset()` refuses | difference: one-shot per process, finalization terminal, no restart (the reference's `init_chli` restarts) | native: every restart route rejected, fresh process verified |
+| `check_status`, `HLIError` | `check_status`, `HLIError` with numeric status | parity; no vendor text by default | native through every failing case |
 | generated message table (`FAMEMessages.jl`) | fixed table of known codes in the package's own words, numeric fallback | difference: nothing parsed from an installation | offline |
 | extended error text (`cfmferr` after status 513) | opt-in `Session.enable_extended_errors()` over the declared `cfmlerr`/`cfmferr` calls, bounded buffer, captured at the failure, never in messages | difference: opt-in and redacted by default | native (`extended_errors` group, both hosts at 040fed3) |
 
@@ -31,31 +70,33 @@ implemented.
 
 | Reference | Python | Class | Evidence |
 |---|---|---|---|
-| `FameDatabase`, `opendb`, `closedb!` | `Database`, `open_database`, `close` | parity for the five local modes | native (all five modes, stale handles, cross-process) |
-| `workdb` | `work_database()` | parity | native |
-| `postdb` | `Database.post()`; high-level path writers post on success | parity; close never posts (documented) | native |
+| `FameDatabase`, `opendb`, `closedb!` | `FameDatabase`, `opendb`, `closedb` (returns the handle) | parity for the five local modes; the handle never stores or prints the name | native (all five modes, stale handles, cross-process) |
+| `workdb` | `workdb()` | parity | native |
+| `postdb` | `postdb(db)`; `writefame` on a path posts on success | parity; close never posts (documented) | native |
 | `:write`, `:direct_write` modes | refused before any native call | difference: server-connection modes are not bound by the reference either; this package refuses them ahead of the library | native (the bad-mode status recorded) |
-| scoped `opendb(f, ...)` | `with open_database(...)` | parity | native |
+| scoped `opendb(f, ...)`, `workdb(f)` | `with opendb(...) as db:` | parity (context manager for the do-block) | native |
 | remote connection strings | passed through the local open, as the reference does; the documented route is read-only | parity for reading; remote writing is outside the route in both wrappers | bounded remote: the same approved three-item selection read through both wrappers on both hosts and equal in class, type, frequency, range, length, stored bits, missing categories, normalized values and bridge index (nonempty annual numeric and precision series without missing observations; nothing else was listed or read) |
 
-## Objects and raw I/O
+## Objects and data I/O
 
 | Reference | Python | Class | Evidence |
 |---|---|---|---|
-| `FameObject`, `quick_info` | `ObjectInfo`, `quick_info` | parity | native |
-| `Period`, `FameIndex`, `FameRange` | `Period`, `RangeSpec`; 64-bit indices throughout | difference: the reference's narrower `FameIndex(Period)` output width is not copied | native (year/period conversions on every anchor) |
-| `listdb` and ITEM filters | `list_objects` | parity plus an exact-frequency post-filter; ITEM options normalized to ON afterwards (the reference restores nothing either) | native (family and index words, cursor cleanup, truncation) |
-| `do_read!` | `read_object` (raw carriers) | parity plus subranges and exact-width scalars | native (every kind, endpoints, subranges) |
-| `do_write` | `write_object` | parity; every check before the first native call; `replace` deletes first as the reference does | native |
+| `FameObject(name, class, type, freq, first, last, data)`, mutable, returned by `quick_info` and `listdb` | `FameObject(name, class_, type, freq, first_index, last_index, data)`, mutable, returned by `quick_info` and `listdb` without data | parity for the model; difference: codes are validated when assigned, the data when written or converted (never a Ref/vector layout), a date value's type is its frequency as in the reference, other classes can be listed but not read or written | offline (renamed model); native evidence for the metadata and the read/write paths at 889d219 |
+| `quick_info` | `quick_info` | parity | native |
+| `Period`, `FameIndex`, `FameRange` | `Period`, `FameRange`; 64-bit indices throughout | difference: the reference's narrower `FameIndex(Period)` output width is not copied; `FameRange` fields are `frequency`, `first`, `last` | native (year/period conversions on every anchor) |
+| `listdb` and ITEM filters (`alias`, `class`, `type`, `freq`) | `listdb(db, wildcard, alias=, class_=, type=, freq=)`, also on a path | parity plus an exact-frequency post-filter (family words refused, not interpreted); ITEM options normalized to ON afterwards (the reference restores nothing either) | native (family and index words, cursor cleanup, truncation) |
+| `do_read!` (reads the object's range in place) | `do_read(obj, db)` | parity plus metadata re-queried inside the locked read (a changed object is refused) and exact-width scalars; the object's range selects a subrange | native (every kind, endpoints, subranges) |
+| `do_write` (always deletes an existing object first) | `do_write(obj, db, replace=True)` | parity: default replacement; `replace=False` is an opt-out; every check before the first native call | replacement path native at the recorded revisions; new default offline until the next campaign |
 | namelist text | ordered `NameList` members parsed under a strict grammar | difference: members, not the library's layout | native (the library's layout recorded) |
-| missing encodings | preserved on raw carriers; `classify_by_sentinel` and the library's classifier agree | parity at the raw layer | native (classifier agreement per value) |
+| missing encodings | preserved on the object's data; `classify_by_sentinel` and the library's classifier agree | parity at the data layer | native (classifier agreement per value) |
 | formulas, globals | not offered as structured I/O (commands only) | parity with the reference's rejection | offline |
+| object deletion (inside the reference's `do_write`) | `delete_object(db, name)` | extension (also exposed on its own) | native |
 
 ## Commands
 
 | Reference | Python | Class | Evidence |
 |---|---|---|---|
-| `fame`, `@fame_str` | `run_command` | parity for capture, quiet and stream output | native |
+| `fame(command; quiet)`, `fame(io, command)`, `@fame_str` | `fame(command, quiet=, output=)` returning the captured bytes | parity for capture, quiet and stream output; no macro form | native |
 | `INPUT` expansion, `.inp` suffix, literal `FILE()` | `expand_input` | parity plus cycle, depth and size limits; computed `FILE()` refused | native |
 | output restoration | always restored, stage named on the error | difference: the reference does not restore in a finally block | native |
 
@@ -63,7 +104,7 @@ implemented.
 
 | Reference | Python | Class | Evidence |
 |---|---|---|---|
-| `refame`, `unfame` | `bridge.to_fame`, `bridge.from_fame`, `read_value`, `write_value` | parity for every kind | native (every kind, every missing category, empties) |
+| `refame(name, value)`, `unfame(fo)` | `refame(name, value)`, `unfame(obj)` | parity for every kind; the policies (`missing`, `empty`, `text`) are keywords | native (every kind, every missing category, empties) |
 | integer scalars | exact float64 or refusal | difference: the reference rounds to float32 | offline, native |
 | scalar NaN | written as NC | difference: the reference's NaN test never matches | native |
 | missing Boolean read as `true` | refused (`MissingValueError`) | difference | native |
@@ -73,8 +114,8 @@ implemented.
 | case (`Unit`) as a date value | refused before any native call | difference: the reference maps it and lets the library refuse (status 16) | native (the library's status asserted) |
 | frequency maps: case, daily, business, 7 weekly, monthly, 3 quarterly, 6 half-yearly, 12 annual | `fame_frequency`, `tsecon_frequency`, `mit_to_index`, `index_to_mit` | parity | native (inverse, adjacency, year boundary, period counts, round trips per anchor); differential on Linux |
 | other library frequencies | `UnsupportedFrequencyError`, never remapped | parity | native |
-| `readfame` (names, wildcards, `namecase`, `prefix`/`glue`, `collect`) | `read_workspace`, `read_workspace_report` | parity; collisions refused instead of overwritten; contained variant is an extension | native |
-| `writefame` (workspaces, MVTSeries, prefix/glue) | `write_workspace`, `write_workspace_report` | parity; explicit `mode` required for paths (the reference defaults to overwrite) | native |
+| `readfame` (names, wildcards, `namecase`, `prefix`/`glue`, `collect`, listing filters) | `readfame`, `bridge.readfame_report` | parity; collisions refused instead of overwritten; a failed object raises (the reference logs and skips it), contained in the report variant | native |
+| `writefame` (workspaces, MVTSeries, a tuple of them, prefix/glue) | `writefame`, `bridge.writefame_report` | parity; explicit `mode` required for paths (the reference defaults to overwrite); a failed object raises (the reference logs and skips it), contained in the report variant | native |
 | MVTSeries reconstruction on read | not implemented | parity (the reference leaves it commented out) | offline |
 | per-object error logging | `*_report` variants with `ObjectFailure` records | extension | native |
 

@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: MIT AND BSD-3-Clause
 # Workspace semantics adapted from FAME.jl (Bridge.jl); see licenses/FAME.jl.txt.
 # Copyright (c) 2020-2024, Bank of Canada. All rights reserved.
-"""Workspace reads and writes (the reference's readfame and writefame).
+"""Workspace reads and writes: ``readfame``, ``writefame`` and their report variants.
 
 Reading: positional names are explicit object names or wildcard patterns
-(``?`` any run, ``^`` one character). A wildcard is expanded with
-``list_objects`` and the listing filters; an explicit name is looked up
-whatever its class, type or frequency. Names are transformed in this order:
-the ``prefix`` (joined by ``glue``) is stripped from the start when present,
-``collect`` entries nest matching names into sub-workspaces, and finally
-``namecase`` (``str.lower`` by default) produces the key. Every destination
-is computed before any object is read, so two different objects that would
-land on the same key, or a key that would be both a value and a nested
-workspace, are refused (``NameCollisionError``) instead of one silently
-overwriting the other. The same object matched twice is read once. Explicit
-names keep their argument order; wildcard matches are ordered by name bytes
-(a package rule; the library's cursor order is not relied upon).
+(``?`` any run, ``^`` one character). A wildcard is expanded with ``listdb``
+and its ``alias``, ``class_``, ``type`` and ``freq`` filters; an explicit
+name is looked up with ``quick_info`` whatever its class, type or
+frequency. Names are transformed in this order: the ``prefix`` (joined by
+``glue``) is stripped from the start when present, ``collect`` entries nest
+matching names into sub-workspaces, and finally ``namecase`` (``str.lower``
+by default) produces the key. Every destination is computed before any
+object is read, so two different objects that would land on the same key,
+or a key that would be both a value and a nested workspace, are refused
+(``NameCollisionError``) instead of one silently overwriting the other. The
+same object matched twice is read once. Explicit names keep their argument
+order; wildcard matches are ordered by name bytes (a package rule; the
+library's cursor order is not relied upon). Each object is then read with
+``do_read`` and converted with ``unfame``, as the reference does.
 
 The strict functions raise at the first failure. The ``*_report`` variants
 contain failures per object and return the partial result together with a
@@ -27,14 +29,15 @@ recursively by joining names with ``glue`` (an optional ``prefix`` is
 prepended to every top-level name; ``prefix=""`` still adds the glue).
 Every flattened name is validated, checked for collisions under the
 library's case-insensitive naming, and every value is validated and
-converted before the first create, replace or delete. Existing objects are
-replaced by default, as the reference does. With a path target the database
-is opened in the given mode, posted after a fully successful write and
-always closed; with a database handle nothing is posted. No rollback is
-promised: a failure after some objects were replaced leaves them replaced.
-Multivariate series are written as one series per column and read back as
-separate series; the reference does not reconstruct them and neither does
-this package (use ``collect`` to nest the columns under the original name).
+converted (``refame``) before the first create, replace or delete. Existing
+objects are replaced by default, as the reference does. With a path target
+the database is opened in the given mode, posted after a fully successful
+write and always closed; with a database handle nothing is posted. No
+rollback is promised: a failure after some objects were replaced leaves
+them replaced. Multivariate series are written as one series per column
+and read back as separate series; the reference does not reconstruct them
+and neither does this package (use ``collect`` to nest the columns under
+the original name).
 """
 
 from __future__ import annotations
@@ -47,19 +50,19 @@ from typing import Any
 from tsecon import MVTSeries, Workspace
 
 from .._constants import access_mode
-from .._data import RawObject, attribute_codes, read_object, write_object
-from .._database import Database, open_database
-from .._errors import DataValidationError, FameError, UnsupportedOperationError
-from .._objects import ObjectInfo, quick_info
+from .._data import RawObject, attribute_codes, do_read, write_raw
+from .._database import FameDatabase, closedb, opendb, postdb
+from .._errors import DataValidationError, HLIError, UnsupportedOperationError
+from .._objects import FameObject, quick_info
 from .._text import TextEncodingError, object_name
-from .._wildcard import is_wildcard, list_objects
+from .._wildcard import is_wildcard, listdb
 from ._frequencies import UnsupportedFrequencyError, owner_session
 from ._values import (
     EmptySeriesError,
     MissingValueError,
     check_policies,
-    from_fame,
     to_fame,
+    unfame,
     validate_value,
 )
 
@@ -70,14 +73,15 @@ __all__ = [
     "WorkspaceCycleError",
     "WriteReport",
     "flatten_names",
-    "read_workspace",
-    "read_workspace_report",
+    "readfame",
+    "readfame_report",
     "resolve_names",
-    "write_workspace",
-    "write_workspace_report",
+    "writefame",
+    "writefame_report",
 ]
 
 CollectSpec = Any  # str | tuple[str, Sequence[CollectSpec]] | Mapping[str, Sequence] | list
+Target = FameDatabase | str | bytes | os.PathLike[str]
 
 
 class NameCollisionError(ValueError):
@@ -89,7 +93,7 @@ class WorkspaceCycleError(ValueError):
 
 
 # Errors that mean "this object cannot be represented", as opposed to native
-# failures; the raw carrier is a lossless fallback for them.
+# failures; the FameObject itself is a lossless fallback for them.
 CONVERSION_ERRORS: tuple[type[Exception], ...] = (
     UnsupportedFrequencyError,
     MissingValueError,
@@ -252,12 +256,12 @@ def _destination(
     return (*path, _apply_namecase(namecase, name))
 
 
-def _fame_name_text(info: ObjectInfo) -> str:
-    return info.name_text.upper()
+def _fame_name_text(obj: FameObject) -> str:
+    return obj.name_text.upper()
 
 
 def resolve_names(
-    database: Database,
+    db: FameDatabase,
     names: Sequence[str | bytes],
     *,
     namecase: Callable[[str], str] = str.lower,
@@ -265,15 +269,15 @@ def resolve_names(
     glue: str = "_",
     collect: CollectSpec = (),
     alias: bool = True,
-    classes: Any = None,
-    types: Any = None,
-    frequencies: Any = None,
-) -> list[tuple[str, tuple[str, ...]]]:
-    """Resolve arguments to ``[(FAME name, key path), ...]`` and refuse collisions.
+    class_: Any = "",
+    type: Any = "",
+    freq: Any = "",
+) -> list[tuple[FameObject, tuple[str, ...]]]:
+    """Resolve arguments to ``[(FameObject, key path), ...]`` and refuse collisions.
 
     Explicit names are queried with ``quick_info`` (an absent object raises
-    the library's status); wildcards are listed with the filters. Duplicated
-    objects are kept once, at their first position.
+    the library's status); wildcards are listed with ``listdb`` and the
+    filters. Duplicated objects are kept once, at their first position.
     """
     if not callable(namecase):
         raise TypeError("namecase must be callable.")
@@ -282,29 +286,26 @@ def resolve_names(
     if prefix is not None and not isinstance(prefix, str):
         raise TypeError("prefix must be a str or None.")
     spec = _normalize_collect(collect)
-    ordered: list[str] = []
+    ordered: list[FameObject] = []
     seen: set[str] = set()
     for argument in names or ("?",):
         if is_wildcard(argument):
-            infos = list_objects(
-                database,
-                argument,
-                alias=alias,
-                classes=classes,
-                types=types,
-                frequencies=frequencies,
+            found = sorted(
+                listdb(db, argument, alias=alias, class_=class_, type=type, freq=freq),
+                key=_fame_name_text,
             )
-            found = sorted(_fame_name_text(info) for info in infos)
         else:
-            found = [_fame_name_text(quick_info(database, argument))]
-        for text in found:
+            found = [quick_info(db, argument)]
+        for obj in found:
+            text = _fame_name_text(obj)
             if text not in seen:
                 seen.add(text)
-                ordered.append(text)
-    resolved: list[tuple[str, tuple[str, ...]]] = []
+                ordered.append(obj)
+    resolved: list[tuple[FameObject, tuple[str, ...]]] = []
     leaves: dict[tuple[str, ...], str] = {}
     branches: set[tuple[str, ...]] = set()
-    for text in ordered:
+    for obj in ordered:
+        text = _fame_name_text(obj)
         key = _destination(text, glue=glue, namecase=namecase, prefix=prefix, collect=spec)
         if key in leaves:
             raise NameCollisionError(
@@ -313,7 +314,7 @@ def resolve_names(
         for depth in range(1, len(key)):
             branches.add(key[:depth])
         leaves[key] = text
-        resolved.append((text, key))
+        resolved.append((obj, key))
     for branch in branches:
         if branch in leaves:
             raise NameCollisionError(
@@ -336,28 +337,28 @@ def _place(root: Workspace, key: tuple[str, ...], value: Any) -> None:
 # -- reading --------------------------------------------------------------------
 
 
-def _resolve_target(target: Any, mode: Any) -> tuple[Database, bool]:
-    if isinstance(target, Database):
+def _resolve_target(target: Any, mode: Any) -> tuple[FameDatabase, bool]:
+    if isinstance(target, FameDatabase):
         if mode is not None:
             raise ValueError("mode applies only when a path is given.")
         return target, False
     if isinstance(target, (str, bytes, os.PathLike)):
-        return open_database(target, "readonly" if mode is None else mode), True
-    raise TypeError("Expected a Database or a database path.")
+        return opendb(target, "readonly" if mode is None else mode), True
+    raise TypeError("Expected a FameDatabase or a database path.")
 
 
 def _check_target(target: Any, mode: Any) -> None:
-    if isinstance(target, Database):
+    if isinstance(target, FameDatabase):
         if mode is not None:
             raise ValueError("mode applies only when a path is given.")
         return
     if not isinstance(target, (str, bytes, os.PathLike)):
-        raise TypeError("Expected a Database or a database path.")
+        raise TypeError("Expected a FameDatabase or a database path.")
 
 
 def _read_into(
-    database: Database,
-    resolved: list[tuple[str, tuple[str, ...]]],
+    db: FameDatabase,
+    resolved: list[tuple[FameObject, tuple[str, ...]]],
     *,
     missing: str,
     empty: str,
@@ -368,21 +369,23 @@ def _read_into(
     workspace = Workspace()
     failures: list[ObjectFailure] = []
     raw_names: list[str] = []
-    for name, key in resolved:
+    for obj, key in resolved:
+        name = _fame_name_text(obj)
         try:
-            raw: RawObject = read_object(database, name)
-        except (FameError, UnsupportedOperationError, DataValidationError) as error:
-            # A native status, an unsupported class (formula, global) or an
-            # unreadable type: there is no raw carrier to fall back on.
+            do_read(obj, db)
+        except (HLIError, UnsupportedOperationError, DataValidationError) as error:
+            # A native status, an unsupported class (formula, global), an
+            # unreadable type or an object changed since it was listed:
+            # there is no data to fall back on.
             if not contain:
                 raise
             failures.append(ObjectFailure(name, key, error))
             continue
         try:
-            value = from_fame(raw, database=database, missing=missing, empty=empty, text=text)
+            value = unfame(obj, database=db, missing=missing, empty=empty, text=text)
         except CONVERSION_ERRORS as error:
             if raw_fallback:
-                value = raw
+                value = obj
                 raw_names.append(name)
             elif contain:
                 failures.append(ObjectFailure(name, key, error))
@@ -393,8 +396,8 @@ def _read_into(
     return ReadReport(workspace, tuple(failures), tuple(raw_names))
 
 
-def read_workspace_report(
-    target: Database | str | bytes | os.PathLike[str],
+def readfame_report(
+    db: Target,
     *names: str | bytes,
     namecase: Callable[[str], str] = str.lower,
     prefix: str | None = None,
@@ -405,21 +408,21 @@ def read_workspace_report(
     text: str = "ascii",
     raw_fallback: bool = False,
     alias: bool = True,
-    classes: Any = None,
-    types: Any = None,
-    frequencies: Any = None,
+    class_: Any = "",
+    type: Any = "",
+    freq: Any = "",
 ) -> ReadReport:
-    """Read objects into a workspace, containing per-object failures.
+    """``readfame`` with per-object containment (an extension of the reference).
 
     Name resolution (including absent explicit names and collisions) is
     strict; only the read and conversion of each resolved object is
     contained. With ``raw_fallback=True`` an object the bridge cannot
-    represent is stored as its ``RawScalar``/``RawSeries`` and listed in
-    ``report.raw``; native read failures are always failures.
+    represent is stored as its ``FameObject`` (data read, not converted)
+    and listed in ``report.raw``; native read failures are always failures.
     """
     check_policies(missing, empty, text)
-    _check_target(target, None)
-    database, owned = _resolve_target(target, None)
+    _check_target(db, None)
+    database, owned = _resolve_target(db, None)
     try:
         resolved = resolve_names(
             database,
@@ -429,9 +432,9 @@ def read_workspace_report(
             glue=glue,
             collect=collect,
             alias=alias,
-            classes=classes,
-            types=types,
-            frequencies=frequencies,
+            class_=class_,
+            type=type,
+            freq=freq,
         )
         return _read_into(
             database,
@@ -444,11 +447,11 @@ def read_workspace_report(
         )
     finally:
         if owned:
-            database.close()
+            closedb(database)
 
 
-def read_workspace(
-    target: Database | str | bytes | os.PathLike[str],
+def readfame(
+    db: Target,
     *names: str | bytes,
     namecase: Callable[[str], str] = str.lower,
     prefix: str | None = None,
@@ -459,18 +462,25 @@ def read_workspace(
     text: str = "ascii",
     raw_fallback: bool = False,
     alias: bool = True,
-    classes: Any = None,
-    types: Any = None,
-    frequencies: Any = None,
+    class_: Any = "",
+    type: Any = "",
+    freq: Any = "",
 ) -> Workspace:
-    """Read objects into a ``Workspace``; the first failure raises.
+    """Read objects from a database into a ``Workspace``; the first failure raises.
 
-    With no names every object is read (``"?"``). A path opens read-only and
-    is closed afterwards. See the module note for the name transformations.
+    ``db`` is an open ``FameDatabase`` or a path, opened read-only and closed
+    afterwards. With no names every object is read (``"?"``). Names are
+    explicit objects or wildcards; ``alias``, ``class_``, ``type`` and
+    ``freq`` filter the wildcard listing only. ``namecase``, ``prefix``,
+    ``glue`` and ``collect`` shape the keys (see the module note);
+    ``missing``, ``empty`` and ``text`` are the conversion policies. Unlike
+    the reference, an object that cannot be read or converted raises here
+    instead of being logged and skipped; ``readfame_report`` contains such
+    failures per object.
     """
     check_policies(missing, empty, text)
-    _check_target(target, None)
-    database, owned = _resolve_target(target, None)
+    _check_target(db, None)
+    database, owned = _resolve_target(db, None)
     try:
         resolved = resolve_names(
             database,
@@ -480,9 +490,9 @@ def read_workspace(
             glue=glue,
             collect=collect,
             alias=alias,
-            classes=classes,
-            types=types,
-            frequencies=frequencies,
+            class_=class_,
+            type=type,
+            freq=freq,
         )
         return _read_into(
             database,
@@ -495,7 +505,7 @@ def read_workspace(
         ).workspace
     finally:
         if owned:
-            database.close()
+            closedb(database)
 
 
 # -- writing --------------------------------------------------------------------
@@ -529,7 +539,7 @@ def flatten_names(
     for container in data:
         if not isinstance(container, _CONTAINERS):
             raise TypeError(
-                "write_workspace expects Workspace, mapping or MVTSeries values, "
+                "writefame expects Workspace, mapping or MVTSeries values, "
                 f"not {type(container).__name__}."
             )
         _flatten_into(container, prefix, glue, flat, [])
@@ -568,6 +578,13 @@ def _flatten_into(
         stack.pop()
 
 
+def _unpack(data: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The reference also accepts one tuple of workspaces as the data argument."""
+    if len(data) == 1 and isinstance(data[0], tuple):
+        return data[0]
+    return data
+
+
 def _prepare_write(
     target: Any,
     mode: Any,
@@ -586,7 +603,7 @@ def _prepare_write(
     callers (strictly, or contained in report mode).
     """
     _check_target(target, mode)
-    if not isinstance(target, Database) and mode is None:
+    if not isinstance(target, FameDatabase) and mode is None:
         raise ValueError("Writing to a path needs an explicit mode.")
     if mode is not None:
         access_mode(mode)
@@ -601,8 +618,8 @@ def _convert_all(
     return [(name, to_fame(value, session=session, empty=empty, text=text)) for name, value in flat]
 
 
-def write_workspace(
-    target: Database | str | bytes | os.PathLike[str],
+def writefame(
+    db: Target,
     *data: Workspace | Mapping[str, Any] | MVTSeries,
     mode: Any = None,
     prefix: str | None = None,
@@ -615,38 +632,41 @@ def write_workspace(
 ) -> tuple[str, ...]:
     """Write workspaces, mappings or multivariate series; the first failure raises.
 
-    Returns the FAME names written. Given a path, ``mode`` is required (the
-    reference defaults to overwrite; this package asks for the mode
-    explicitly), the database is posted after every object was written and
-    always closed. Given a database handle nothing is posted. Every
-    validation and conversion (including the string value encoding selected
-    by ``text``) completes before the destination is opened; with nothing
-    to write (empty inputs) the destination is not opened at all and ``()``
-    is returned.
+    Returns the FAME names written. ``db`` is an open ``FameDatabase`` (nothing
+    is posted) or a path, for which ``mode`` is required: the reference
+    defaults a path to overwrite, this package asks for the mode explicitly.
+    A path is posted after every object was written and always closed.
+    Every validation and conversion (including the string value encoding
+    selected by ``text``) completes before the destination is opened; with
+    nothing to write (empty inputs) the destination is not opened at all and
+    ``()`` is returned. Unlike the reference, a failed object raises instead
+    of being logged and skipped; ``writefame_report`` contains failures per
+    object.
     """
-    flat = _prepare_write(target, mode, data, prefix, glue, empty, basis, observed, text)
+    data = _unpack(data)
+    flat = _prepare_write(db, mode, data, prefix, glue, empty, basis, observed, text)
     for _, value in flat:
         validate_value(value, empty, text)
-    session = owner_session(target if isinstance(target, Database) else None)
+    session = owner_session(db if isinstance(db, FameDatabase) else None)
     converted = _convert_all(flat, session=session, empty=empty, text=text)
     if not converted:
         return ()
-    database, owned = _resolve_target(target, mode)
+    database, owned = _resolve_target(db, mode)
     try:
         written: list[str] = []
         for name, raw in converted:
-            _write_one(database, name, raw, replace, basis, observed)
+            write_raw(database, name, raw, replace=replace, basis=basis, observed=observed)
             written.append(name)
         if owned:
-            database.post()
+            postdb(database)
         return tuple(written)
     finally:
         if owned:
-            database.close()
+            closedb(database)
 
 
-def write_workspace_report(
-    target: Database | str | bytes | os.PathLike[str],
+def writefame_report(
+    db: Target,
     *data: Workspace | Mapping[str, Any] | MVTSeries,
     mode: Any = None,
     prefix: str | None = None,
@@ -657,7 +677,7 @@ def write_workspace_report(
     observed: Any = None,
     text: str = "ascii",
 ) -> WriteReport:
-    """Write with per-object containment: every object is attempted.
+    """``writefame`` with per-object containment: every object is attempted.
 
     Flattening, name validation, collisions, cycles, policies and attributes
     stay strict (nothing is written when they fail). An invalid value, a
@@ -669,39 +689,34 @@ def write_workspace_report(
     or opening anything. With a path the database is posted when at least
     one object was written (the report says so), then closed.
     """
-    flat = _prepare_write(target, mode, data, prefix, glue, empty, basis, observed, text)
-    session = owner_session(target if isinstance(target, Database) else None)
+    data = _unpack(data)
+    flat = _prepare_write(db, mode, data, prefix, glue, empty, basis, observed, text)
+    session = owner_session(db if isinstance(db, FameDatabase) else None)
     failures: list[ObjectFailure] = []
     converted: list[tuple[str, RawObject]] = []
     for name, value in flat:
         try:
             validate_value(value, empty, text)
             converted.append((name, to_fame(value, session=session, empty=empty, text=text)))
-        except (FameError, TypeError, ValueError, UnsupportedOperationError) as error:
+        except (HLIError, TypeError, ValueError, UnsupportedOperationError) as error:
             failures.append(ObjectFailure(name, (name,), error))
     if not converted:
         return WriteReport((), tuple(failures), False)
-    database, owned = _resolve_target(target, mode)
+    database, owned = _resolve_target(db, mode)
     posted = False
     try:
         written: list[str] = []
         for name, raw in converted:
             try:
-                _write_one(database, name, raw, replace, basis, observed)
-            except (FameError, DataValidationError) as error:
+                write_raw(database, name, raw, replace=replace, basis=basis, observed=observed)
+            except (HLIError, DataValidationError) as error:
                 failures.append(ObjectFailure(name, (name,), error))
                 continue
             written.append(name)
         if owned and written:
-            database.post()
+            postdb(database)
             posted = True
         return WriteReport(tuple(written), tuple(failures), posted)
     finally:
         if owned:
-            database.close()
-
-
-def _write_one(
-    database: Database, name: str, raw: RawObject, replace: bool, basis: Any, observed: Any
-) -> None:
-    write_object(database, name, raw, replace=replace, basis=basis, observed=observed)
+            closedb(database)

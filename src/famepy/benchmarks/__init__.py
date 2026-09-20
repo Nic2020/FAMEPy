@@ -463,26 +463,29 @@ def _round_trip(
     path = scratch / f"round-{repetition}.db"
     workspace_path = scratch / f"workspace-{repetition}.db"
     with timer.phase("convert_to_fame"):
-        converted = [
-            (name, bridge.to_fame(value, session=session)) for name, value in batch.items()
-        ]
-    with famepy.open_database(path, "create", session=session) as database:
+        converted = [famepy.refame(name, value, session=session) for name, value in batch.items()]
+    with famepy.opendb(path, "create", session=session) as database:
         with timer.phase("write_raw"):
-            for name, raw in converted:
-                famepy.write_object(database, name, raw)
+            for obj in converted:
+                famepy.do_write(obj, database)
         with timer.phase("post"):
-            database.post()
-    with famepy.open_database(path, "readonly", session=session) as database:
+            famepy.postdb(database)
+    with famepy.opendb(path, "readonly", session=session) as database:
         with timer.phase("read_raw"):
-            raws = [famepy.read_object(database, name) for name in batch]
+            objects = [
+                famepy.do_read(famepy.quick_info(database, name), database) for name in batch
+            ]
         with timer.phase("convert_from_fame"):
-            converted_back = [bridge.from_fame(raw, database=database) for raw in raws]
+            converted_back = [famepy.unfame(obj, database=database) for obj in objects]
         with timer.phase("read_bridge"):
-            bridged = [bridge.read_value(database, name) for name in batch]
+            bridged = [
+                famepy.unfame(famepy.do_read(famepy.quick_info(database, name), database))
+                for name in batch
+            ]
     with timer.phase("write_workspace"):
-        bridge.write_workspace(workspace_path, batch, mode="create")
+        famepy.writefame(workspace_path, batch, mode="create")
     with timer.phase("read_workspace"):
-        workspace = bridge.read_workspace(workspace_path)
+        workspace = famepy.readfame(workspace_path)
     triples = zip(batch.items(), converted_back, bridged, strict=True)
     for (name, expected), back, bridged_back in triples:
         _check(_same_floats(back.values, expected.values), f"{name} (raw)")
@@ -530,17 +533,17 @@ def scenario_dates(scale: dict[str, int]) -> Scenario:
         series = _dates_fixture(length)
         path = scratch / f"dates-{repetition}.db"
         with timer.phase("convert_to_fame"):
-            raw = bridge.to_fame(series, session=session)
-        with famepy.open_database(path, "create", session=session) as database:
+            obj = famepy.refame("dates", series, session=session)
+        with famepy.opendb(path, "create", session=session) as database:
             with timer.phase("write_raw"):
-                famepy.write_object(database, "dates", raw)
+                famepy.do_write(obj, database)
             with timer.phase("post"):
-                database.post()
-        with famepy.open_database(path, "readonly", session=session) as database:
+                famepy.postdb(database)
+        with famepy.opendb(path, "readonly", session=session) as database:
             with timer.phase("read_raw"):
-                back = famepy.read_object(database, "dates")
+                back = famepy.do_read(famepy.quick_info(database, "dates"), database)
             with timer.phase("convert_from_fame"):
-                dates = bridge.from_fame(back, database=database)
+                dates = famepy.unfame(back, database=database)
         _check(tuple(dates.values) == tuple(series.values), "dates")
         _check(dates.firstdate == series.firstdate, "dates (first date)")
         return {"objects": 1, "observations": length, "database_bytes": path.stat().st_size}
@@ -555,17 +558,17 @@ def scenario_strings(scale: dict[str, int]) -> Scenario:
         series = _strings_fixture(length)
         path = scratch / f"strings-{repetition}.db"
         with timer.phase("convert_to_fame"):
-            raw = bridge.to_fame(series, session=session)
-        with famepy.open_database(path, "create", session=session) as database:
+            obj = famepy.refame("strings", series, session=session)
+        with famepy.opendb(path, "create", session=session) as database:
             with timer.phase("write_raw"):
-                famepy.write_object(database, "strings", raw)
+                famepy.do_write(obj, database)
             with timer.phase("post"):
-                database.post()
-        with famepy.open_database(path, "readonly", session=session) as database:
+                famepy.postdb(database)
+        with famepy.opendb(path, "readonly", session=session) as database:
             with timer.phase("read_raw"):
-                back = famepy.read_object(database, "strings")
+                back = famepy.do_read(famepy.quick_info(database, "strings"), database)
             with timer.phase("convert_from_fame"):
-                strings = bridge.from_fame(back, database=database)
+                strings = famepy.unfame(back, database=database)
         _check(tuple(strings.values) == tuple(series.values), "strings")
         _check(strings.firstdate == series.firstdate, "strings (first date)")
         return {"objects": 1, "observations": length, "database_bytes": path.stat().st_size}
@@ -580,20 +583,23 @@ def scenario_missing_density(scale: dict[str, int]) -> Scenario:
         fixture = _missing_fixture(length)
         path = scratch / f"missing-{repetition}.db"
         workspace_path = scratch / f"missing-workspace-{repetition}.db"
-        with famepy.open_database(path, "create", session=session) as database:
+        with famepy.opendb(path, "create", session=session) as database:
             for name, series in fixture.items():
                 with timer.phase(f"write_density_{name[1:]}"):
-                    bridge.write_tseries(database, name, series)
-            database.post()
+                    famepy.do_write(famepy.refame(name, series, database=database), database)
+            famepy.postdb(database)
         back: dict[str, Any] = {}
-        with famepy.open_database(path, "readonly", session=session) as database:
+        with famepy.opendb(path, "readonly", session=session) as database:
             for name in fixture:
                 with timer.phase(f"read_density_{name[1:]}"):
-                    back[name] = bridge.read_tseries(database, name)
+                    back[name] = famepy.unfame(
+                        famepy.do_read(famepy.quick_info(database, name), database),
+                        database=database,
+                    )
         with timer.phase("write_workspace"):
-            bridge.write_workspace(workspace_path, fixture, mode="create")
+            famepy.writefame(workspace_path, fixture, mode="create")
         with timer.phase("read_workspace"):
-            workspace = bridge.read_workspace(workspace_path)
+            workspace = famepy.readfame(workspace_path)
         for name, series in fixture.items():
             _check(_same_floats(back[name].values, series.values), name)
             _check(_same_floats(workspace[name].values, series.values), f"{name} (ws)")
@@ -625,7 +631,7 @@ def scenario_migration(scale: dict[str, int]) -> Scenario:
             return {"blocked": f"DataEcon native extension unavailable: {block}"}
         batch = _series_batch(count, length, _ts().Monthly(), 23)
         source = scratch / f"migration-source-{repetition}.db"
-        bridge.write_workspace(source, batch, mode="create")
+        famepy.writefame(source, batch, mode="create")
         archive = scratch / f"archive-{repetition}.daec"
         with timer.phase("plan"):
             plan = migration.plan_migration(source, session=session)
@@ -816,8 +822,8 @@ def worker_main(config: dict[str, Any]) -> int:
     try:
         if mode == "cold":
             started = time.perf_counter()
-            with famepy.open_database(scratch / "first-open.db", "create", session=session) as db:
-                db.post()
+            with famepy.opendb(scratch / "first-open.db", "create", session=session) as db:
+                famepy.postdb(db)
             first_open = time.perf_counter() - started
         payload = measure(
             session, scenario, scratch, mode, repetitions, profile=bool(config.get("profile"))

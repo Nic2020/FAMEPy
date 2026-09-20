@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 import famepy
+import famepy.bridge
 from famepy._data import namelist_members
 
 _DTYPES = {"precision": np.float64, "numeric": np.float32, "boolean": np.int32, "date": np.int64}
@@ -81,6 +82,82 @@ def verify_case_ids(case_id: str, names: list[str]) -> tuple[str, ...]:
     return tuple(ids)
 
 
-def _read(database: famepy.Database, name: Any, **kwargs: Any) -> Any:
-    """Read an object as Any so groups can inspect scalar and series fields."""
-    return famepy.read_object(database, name, **kwargs)
+def _read(
+    database: famepy.FameDatabase,
+    name: Any,
+    *,
+    first_index: int | None = None,
+    last_index: int | None = None,
+) -> Any:
+    """Read an object through the canonical path (quick_info, then do_read).
+
+    An explicit endpoint selects a subrange, as a caller of the reference
+    does by setting the object's range before ``do_read``. Returned as Any
+    so groups can inspect scalar and series data alike.
+    """
+    obj = famepy.quick_info(database, name)
+    if first_index is not None:
+        obj.first_index = first_index
+    if last_index is not None:
+        obj.last_index = last_index
+    return famepy.do_read(obj, database)
+
+
+def _target(target: Any, mode: Any) -> tuple[famepy.FameDatabase, bool]:
+    if isinstance(target, famepy.FameDatabase):
+        if mode is not None:
+            raise ValueError("mode applies only when a path is given.")
+        return target, False
+    return famepy.opendb(target, "readonly" if mode is None else mode), True
+
+
+def _value(target: Any, name: Any, **policies: Any) -> Any:
+    """Read one object as a Python value: quick_info, do_read, unfame.
+
+    ``target`` is a handle or a path (opened read-only and closed); the
+    keywords are the ``unfame`` policies. Groups use this so that every
+    single-object read goes through the canonical calls.
+    """
+    database, owned = _target(target, None)
+    try:
+        return famepy.unfame(_read(database, name), database=database, **policies)
+    finally:
+        if owned:
+            famepy.closedb(database)
+
+
+def _write(
+    target: Any,
+    name: Any,
+    value: Any,
+    *,
+    mode: Any = None,
+    replace: bool = False,
+    empty: str = "preserve",
+    text: str = "ascii",
+    basis: Any = None,
+    observed: Any = None,
+) -> None:
+    """Write one value: refame then do_write; a path is opened in ``mode``, posted, closed.
+
+    Everything that does not need the database (policies, attributes, the
+    conversion itself) runs before a path is opened, so an invalid value
+    never creates or truncates a file.
+    """
+    if not isinstance(target, famepy.FameDatabase) and mode is None:
+        raise ValueError("Writing to a path needs an explicit mode.")
+    if mode is not None:
+        famepy.AccessMode(famepy._constants.access_mode(mode))
+    famepy._data.attribute_codes(basis, observed)
+    session = famepy.bridge.owner_session(
+        target if isinstance(target, famepy.FameDatabase) else None
+    )
+    obj = famepy.refame(name, value, session=session, empty=empty, text=text)
+    database, owned = _target(target, mode)
+    try:
+        famepy.do_write(obj, database, replace=replace, basis=basis, observed=observed)
+        if owned:
+            famepy.postdb(database)
+    finally:
+        if owned:
+            famepy.closedb(database)

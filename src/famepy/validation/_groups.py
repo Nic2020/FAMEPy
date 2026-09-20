@@ -34,7 +34,7 @@ import famepy
 from famepy import bridge
 from famepy._constants import FREQUENCY_MONTHLY, NAME_CAPACITY, AccessMode
 from famepy._data import classify_by_sentinel, namelist_members, sentinel_value
-from famepy._errors import HBMODE, FameError
+from famepy._errors import HBMODE, HLIError
 from famepy._runtime import Session
 from famepy._text import to_native
 from famepy._wildcard import native_listing_count
@@ -50,6 +50,8 @@ from ._bridge_groups import (
 from ._manifest import (
     _decode_manifest,
     _read,
+    _value,
+    _write,
     manifest_object,
     verify_case_ids,
 )
@@ -212,7 +214,7 @@ def run_verify(session: Session, manifest: dict[str, Any], recorder: Recorder) -
     recorder.permit(
         session.sentinels.string_nc, session.sentinels.string_na, session.sentinels.string_nd
     )
-    with famepy.open_database(manifest["database"], "readonly", session=session) as database:
+    with famepy.opendb(manifest["database"], "readonly", session=session) as database:
         for entry in manifest["objects"]:
             name, kind = entry["name"], entry["kind"]
             expected = _decode_manifest(kind, entry["values"])
@@ -239,16 +241,16 @@ def run_verify(session: Session, manifest: dict[str, Any], recorder: Recorder) -
                 else:
                     actual_meta.extend([info.first_index, info.last_index])
             recorder.equal(f"meta:{name}", actual_meta, expected_meta)
-            if isinstance(raw, famepy.RawSeries):
-                actual: Any = raw.values
+            if raw.is_series:
+                actual: Any = raw.data
             elif kind == "namelist":
                 # Ordered members, not the list text: a reordered, missing or
                 # corrupted member fails; a different layout does not.
-                actual = [_members_or_none(raw.value)]
+                actual = [_members_or_none(raw.data)]
             elif kind == "string":
-                actual = [raw.value]
+                actual = [raw.data]
             else:
-                actual = np.array([raw.value])
+                actual = np.array([raw.data])
             recorder.equal(f"values:{name}", actual, expected)
 
 
@@ -441,7 +443,7 @@ def _native_open_status(session: Session, path: Path, mode: AccessMode) -> int:
     with session.operation("open database") as native:
         try:
             key = native.open_database(text, int(mode))
-        except FameError as error:
+        except HLIError as error:
             return error.status
         native.close_database(key)
     return 0
@@ -453,15 +455,15 @@ def group_database(ctx: Context) -> None:
     path = ctx.path("lifecycle.db")
 
     def create_and_post() -> None:
-        with famepy.open_database(path, "create", session=session) as database:
-            famepy.write_object(database, "kept", famepy.scalar("precision", 1.5))
-            database.post()
+        with famepy.opendb(path, "create", session=session) as database:
+            famepy.do_write(_scalar("kept", "precision", 1.5), database)
+            famepy.postdb(database)
 
     r.check("create_write_post_close", create_and_post)
 
     def reopen_readonly() -> Any:
-        with famepy.open_database(path, session=session) as database:
-            return np.array([_read(database, "kept").value])
+        with famepy.opendb(path, session=session) as database:
+            return np.array([_read(database, "kept").data])
 
     r.equal("reopen_readonly_value", r.check("reopen_readonly", reopen_readonly), np.array([1.5]))
     ctx.verify_in_new_process(
@@ -481,10 +483,10 @@ def group_database(ctx: Context) -> None:
     )
 
     def unposted_close() -> list[str]:
-        with famepy.open_database(path, "update", session=session) as database:
-            famepy.write_object(database, "unposted", famepy.scalar("precision", 2.0))
-        with famepy.open_database(path, session=session) as database:
-            return [info.name_text for info in famepy.list_objects(database)]
+        with famepy.opendb(path, "update", session=session) as database:
+            famepy.do_write(_scalar("unposted", "precision", 2.0), database)
+        with famepy.opendb(path, session=session) as database:
+            return [info.name_text for info in famepy.listdb(database)]
 
     names = r.check("close_without_post", unposted_close)
     if names is not None:
@@ -495,18 +497,18 @@ def group_database(ctx: Context) -> None:
         )
     r.expect_error(
         "readonly_missing_file",
-        lambda: famepy.open_database(ctx.path("absent.db"), session=session),
-        (famepy.FameError,),
+        lambda: famepy.opendb(ctx.path("absent.db"), session=session),
+        (famepy.HLIError,),
     )
     r.expect_error(
         "create_existing_file",
-        lambda: famepy.open_database(path, "create", session=session),
-        (famepy.FameError,),
+        lambda: famepy.opendb(path, "create", session=session),
+        (famepy.HLIError,),
     )
     for mode in ("readonly", "update", "shared"):
 
         def open_close(mode: str = mode) -> None:
-            with famepy.open_database(path, mode, session=session) as database:
+            with famepy.opendb(path, mode, session=session) as database:
                 if database.mode.name.lower() != mode:
                     raise AssertionError("mode mismatch")
 
@@ -523,19 +525,19 @@ def group_database(ctx: Context) -> None:
         new_path = ctx.path(f"{mode}_new.db")
 
         def make_fixture(existing: Path = existing) -> None:
-            with famepy.open_database(existing, "create", session=session) as database:
-                famepy.write_object(database, "base", famepy.scalar("precision", 1.0))
-                database.post()
+            with famepy.opendb(existing, "create", session=session) as database:
+                famepy.do_write(_scalar("base", "precision", 1.0), database)
+                famepy.postdb(database)
 
         def reopen(existing: Path = existing) -> list[str]:
-            with famepy.open_database(existing, session=session) as database:
-                return sorted(info.name_text for info in famepy.list_objects(database))
+            with famepy.opendb(existing, session=session) as database:
+                return sorted(info.name_text for info in famepy.listdb(database))
 
         def native_status(target: Path, member: AccessMode = member) -> Callable[[], int]:
             return lambda: _native_open_status(session, target, member)
 
-        def refused(existing: Path = existing, mode: str = mode) -> famepy.Database:
-            return famepy.open_database(existing, mode, session=session)
+        def refused(existing: Path = existing, mode: str = mode) -> famepy.FameDatabase:
+            return famepy.opendb(existing, mode, session=session)
 
         def absent(new_path: Path = new_path) -> bool:
             return new_path.exists()
@@ -559,35 +561,56 @@ def group_database(ctx: Context) -> None:
     overwrite = ctx.path("overwrite.db")
 
     def overwrite_flow() -> int:
-        with famepy.open_database(overwrite, "create", session=session) as database:
-            famepy.write_object(database, "a", famepy.scalar("precision", 1.0))
-            database.post()
-        with famepy.open_database(overwrite, "overwrite", session=session) as database:
-            return len(famepy.list_objects(database))
+        with famepy.opendb(overwrite, "create", session=session) as database:
+            famepy.do_write(_scalar("a", "precision", 1.0), database)
+            famepy.postdb(database)
+        with famepy.opendb(overwrite, "overwrite", session=session) as database:
+            return len(famepy.listdb(database))
 
     r.equal("mode_overwrite_empties", r.check("mode_overwrite", overwrite_flow), 0)
 
     def workdb_flow() -> Any:
-        work = famepy.work_database(session=session)
-        if famepy.work_database(session=session) is not work:
+        work = famepy.workdb(session=session)
+        if famepy.workdb(session=session) is not work:
             raise AssertionError("work database is not a singleton")
-        famepy.write_object(work, "w", famepy.scalar("precision", 3.0), replace=True)
-        value = np.array([_read(work, "w").value])
-        work.close()
+        famepy.do_write(_scalar("w", "precision", 3.0), work, replace=True)
+        value = np.array([_read(work, "w").data])
+        famepy.closedb(work)
         return value
 
     r.equal("work_database", r.check("work_database_flow", workdb_flow), np.array([3.0]))
 
     # Terminal: finalization invalidates handles; this is the last native step.
-    stale = famepy.open_database(path, session=session)
+    stale = famepy.opendb(path, session=session)
     r.check("finalize", session.finalize)
     r.expect_error(
         "stale_handle_after_finalize",
         lambda: famepy.quick_info(stale, "kept"),
         (famepy.StaleHandleError,),
     )
-    r.check("stale_close_harmless", stale.close)
+    r.check("stale_close_harmless", lambda: famepy.closedb(stale))
     r.equal("stale_handle_closed", stale.is_open, False)
+
+
+def _scalar(name: str, kind: str, value: Any, *, date_frequency: Any = None) -> famepy.FameObject:
+    """A scalar FameObject; a date value is typed by its frequency, as the reference spells it."""
+    return famepy.FameObject(
+        name, "scalar", kind if date_frequency is None else date_frequency, "undefined", data=value
+    )
+
+
+def _series(
+    name: str, kind: str, frequency: Any, first: int, values: Any, *, date_frequency: Any = None
+) -> famepy.FameObject:
+    """A series FameObject from its first index and values (the last index follows)."""
+    return famepy.FameObject(
+        name,
+        "series",
+        kind if date_frequency is None else date_frequency,
+        frequency,
+        first,
+        data=values,
+    )
 
 
 # -- raw matrix fixtures ------------------------------------------------------
@@ -646,7 +669,7 @@ ENDPOINT_KINDS: tuple[tuple[str, str, str], ...] = (
 class MatrixFixture:
     name: str
     kind: str
-    raw: Any
+    obj: famepy.FameObject
     values: Any
     manifest: dict[str, Any] | None
     endpoint: tuple[str, ...] | None = None  # the shape for endpoint cases
@@ -719,48 +742,50 @@ def build_matrix_fixtures(s: famepy.Sentinels, first: int) -> list[MatrixFixture
     for name, kind, frequency, date_frequency in SERIES_CASES:
         values = _series_values(name, s, first)
         start = 1 if frequency == "case" else first
-        raw = famepy.series(kind, frequency, start, values, date_frequency=date_frequency)
+        obj = _series(name, kind, frequency, start, values, date_frequency=date_frequency)
         fixtures.append(
             MatrixFixture(
                 name,
                 kind,
-                raw,
+                obj,
                 values,
                 manifest_object(
                     name,
                     kind,
                     values,
                     class_name="series",
-                    type_code=raw.type_code,
-                    frequency=raw.frequency,
+                    type_code=obj.type_code,
+                    frequency=obj.frequency,
                     first_index=start,
                 ),
             )
         )
     for name, kind in SCALAR_CASES:
         value = _scalar_value(name, s, first)
-        raw_scalar = famepy.scalar(
-            kind, value, date_frequency="monthly" if kind == "date" else None
-        )
+        obj = _scalar(name, kind, value, date_frequency="monthly" if kind == "date" else None)
         fixtures.append(
             MatrixFixture(
                 name,
                 kind,
-                raw_scalar,
+                obj,
                 value,
-                manifest_object(
-                    name, kind, [value], class_name="scalar", type_code=raw_scalar.type_code
-                ),
+                manifest_object(name, kind, [value], class_name="scalar", type_code=obj.type_code),
             )
         )
     for prefix, kind, frequency in ENDPOINT_KINDS:
         for shape, slots in ENDPOINT_SHAPES:
             values = _endpoint_values(kind, slots, s, first)
             start = 1 if frequency == "case" else first
-            raw = famepy.series(
-                kind, frequency, start, values, date_frequency="monthly" if kind == "date" else None
+            name = f"{prefix}_{shape}"
+            obj = _series(
+                name,
+                kind,
+                frequency,
+                start,
+                values,
+                date_frequency="monthly" if kind == "date" else None,
             )
-            fixtures.append(MatrixFixture(f"{prefix}_{shape}", kind, raw, values, None, slots))
+            fixtures.append(MatrixFixture(name, kind, obj, values, None, slots))
     return fixtures
 
 
@@ -817,6 +842,8 @@ def _matrix_required() -> tuple[str, ...]:
         *verify_case_ids("cross_process_matrix", matrix_object_names()),
         "replace_and_delete",
         "replace_fixture",
+        "replace_opt_out",
+        "replace_opt_out_unchanged",
         "replace_existing",
         "replace_value",
         "delete_fixture",
@@ -833,7 +860,7 @@ def _object_case_ids(fixture: MatrixFixture) -> tuple[str, ...]:
     name = fixture.name
     if fixture.endpoint is not None:
         return _endpoint_case_ids(name)
-    if isinstance(fixture.raw, famepy.RawSeries):
+    if fixture.obj.is_series:
         ids = (f"read:{name}", f"values:{name}", f"kind:{name}")
         return ids if name in ("empty", "s_empty") else (*ids, f"classifier_agreement:{name}")
     scalar_ids = (f"read:{name}", f"values:{name}")
@@ -843,7 +870,7 @@ def _object_case_ids(fixture: MatrixFixture) -> tuple[str, ...]:
 
 
 def _read_series_case(
-    r: Recorder, database: famepy.Database, fixture: MatrixFixture, s: famepy.Sentinels
+    r: Recorder, database: famepy.FameDatabase, fixture: MatrixFixture, s: famepy.Sentinels
 ) -> None:
     name, kind = fixture.name, fixture.kind
     raw = r.check(f"read:{name}", lambda: _read(database, name))
@@ -852,16 +879,16 @@ def _read_series_case(
             r, (f"values:{name}", f"kind:{name}", f"classifier_agreement:{name}"), "read failed"
         )
         return
-    r.equal(f"values:{name}", raw.values, fixture.values)
+    r.equal(f"values:{name}", raw.data, fixture.values)
     if len(fixture.values):
-        codes = classify_by_sentinel(raw.values, kind, s)
-        native = [famepy.missing_type(database, kind, v) for v in raw.values]
+        codes = classify_by_sentinel(raw.data, kind, s)
+        native = [famepy.missing_type(database, kind, v) for v in raw.data]
         r.equal(f"classifier_agreement:{name}", codes.tolist(), native)
     r.equal(f"kind:{name}", famepy.quick_info(database, name).kind, kind)
 
 
 def _read_scalar_case(
-    r: Recorder, database: famepy.Database, fixture: MatrixFixture, s: famepy.Sentinels
+    r: Recorder, database: famepy.FameDatabase, fixture: MatrixFixture, s: famepy.Sentinels
 ) -> None:
     name, kind, value = fixture.name, fixture.kind, fixture.values
     raw = r.check(f"read:{name}", lambda: _read(database, name))
@@ -874,23 +901,23 @@ def _read_scalar_case(
         # ordered members are asserted; the layout and the length are
         # recorded, never the returned bytes.
         expected_members = namelist_members(value)
-        r.equal(f"values:{name}", _members_or_none(raw.value), list(expected_members))
-        r.fact(f"namelist_length:{name}", len(raw.value))
+        r.equal(f"values:{name}", _members_or_none(raw.data), list(expected_members))
+        r.fact(f"namelist_length:{name}", len(raw.data))
         r.fact(
             f"namelist_layout:{name}",
-            _namelist_layout(raw.value, expected_members),
+            _namelist_layout(raw.data, expected_members),
             note="observation; the list text layout is not a documented contract",
         )
     elif kind == "string":
-        r.equal(f"values:{name}", raw.value, value)
+        r.equal(f"values:{name}", raw.data, value)
     else:
-        r.equal(f"values:{name}", np.array([raw.value]), np.array([value], _DTYPES[kind]))
+        r.equal(f"values:{name}", np.array([raw.data]), np.array([value], _DTYPES[kind]))
     if kind != "namelist":
-        typed: Any = [raw.value] if kind == "string" else np.array([raw.value])
+        typed: Any = [raw.data] if kind == "string" else np.array([raw.data])
         r.equal(
             f"classifier_agreement:{name}",
             int(classify_by_sentinel(typed, kind, s)[0]),
-            famepy.missing_type(database, kind, raw.value),
+            famepy.missing_type(database, kind, raw.data),
         )
 
 
@@ -904,7 +931,7 @@ def _slice(values: Any, start: int, stop: int) -> Any:
 
 
 def _read_endpoint_case(
-    r: Recorder, database: famepy.Database, fixture: MatrixFixture, s: famepy.Sentinels
+    r: Recorder, database: famepy.FameDatabase, fixture: MatrixFixture, s: famepy.Sentinels
 ) -> dict[str, Any] | None:
     """Check an endpoint fixture and return the manifest for its persisted part.
 
@@ -918,17 +945,18 @@ def _read_endpoint_case(
     name, kind, shape = fixture.name, fixture.kind, fixture.endpoint
     assert shape is not None
     written = fixture.values
-    written_first = fixture.raw.first_index
+    written_first = fixture.obj.first_index
+    assert written_first is not None
     written_last = written_first + len(written) - 1
     raw = r.check(f"endpoint_read:{name}", lambda: _read(database, name))
     if raw is None:
         _block_missing(r, _endpoint_case_ids(name), "read failed")
         return None
-    if raw.is_empty:
+    if raw.is_empty(s.index_nc):
         r.fact(f"endpoint_range:{name}", "empty")
         r.fact(f"endpoint_codes:{name}", [])
-        r.equal(f"endpoint_retained:{name}", [True, raw.values], [True, _slice(written, 0, 0)])
-        r.equal(f"endpoint_explicit:{name}", raw.values, _slice(written, 0, 0))
+        r.equal(f"endpoint_retained:{name}", [True, raw.data], [True, _slice(written, 0, 0)])
+        r.equal(f"endpoint_explicit:{name}", raw.data, _slice(written, 0, 0))
         start, stop = 0, 0
     else:
         within = written_first <= raw.first_index <= raw.last_index <= written_last
@@ -937,20 +965,20 @@ def _read_endpoint_case(
             f"endpoint_range:{name}",
             [raw.first_index - written_first, raw.last_index - written_first],
         )
-        r.fact(f"endpoint_codes:{name}", classify_by_sentinel(raw.values, kind, s).tolist())
+        r.fact(f"endpoint_codes:{name}", classify_by_sentinel(raw.data, kind, s).tolist())
         start = max(raw.first_index - written_first, 0)
         stop = min(raw.last_index - written_first + 1, len(written)) if within else 0
         retained = _slice(written, start, stop)
-        r.equal(f"endpoint_retained:{name}", [within, raw.values], [True, retained])
+        r.equal(f"endpoint_retained:{name}", [within, raw.data], [True, retained])
         explicit = _read(database, name, first_index=raw.first_index, last_index=raw.last_index)
-        r.equal(f"endpoint_explicit:{name}", explicit.values, retained)
+        r.equal(f"endpoint_explicit:{name}", explicit.data, retained)
     if "value" in shape:
         offset = shape.index("value")
         position = written_first + offset
-        kept = (not raw.is_empty) and raw.first_index <= position <= raw.last_index
+        kept = (not raw.is_empty(s.index_nc)) and raw.first_index <= position <= raw.last_index
         actual: Any = None
         if kept:
-            stored = raw.values[position - raw.first_index]
+            stored = raw.data[position - raw.first_index]
             actual = stored if kind == "string" else np.array([stored])
         expected: Any = written[offset]
         if kind != "string":
@@ -961,8 +989,8 @@ def _read_endpoint_case(
         kind,
         _slice(written, start, stop),
         class_name="series",
-        type_code=fixture.raw.type_code,
-        frequency=fixture.raw.frequency,
+        type_code=fixture.obj.type_code,
+        frequency=fixture.obj.frequency,
         first_index=None if stop <= start else written_first + start,
     )
 
@@ -985,35 +1013,35 @@ def group_raw_matrix(ctx: Context) -> None:
     manifest_objects: list[dict[str, Any]] = []
 
     def write_all() -> None:
-        with famepy.open_database(path, "create", session=session) as database:
+        with famepy.opendb(path, "create", session=session) as database:
             for fixture in fixtures:
 
                 def write(fixture: MatrixFixture = fixture) -> None:
-                    famepy.write_object(database, fixture.name, fixture.raw)
+                    famepy.do_write(fixture.obj, database)
 
                 if r.ok(f"write:{fixture.name}", write):
                     created.add(fixture.name)
                     if fixture.manifest is not None:
                         manifest_objects.append(fixture.manifest)
-            r.check("post_matrix", database.post)
+            r.check("post_matrix", lambda: famepy.postdb(database))
 
     r.check("create_matrix", write_all)
     _block_missing(r, [f"write:{name}" for name in by_name], "database not created")
 
-    def verify_one(database: famepy.Database, fixture: MatrixFixture) -> None:
+    def verify_one(database: famepy.FameDatabase, fixture: MatrixFixture) -> None:
         if fixture.endpoint is not None:
             entry = _read_endpoint_case(r, database, fixture, s)
             if entry is not None:
                 manifest_objects.append(entry)
-        elif isinstance(fixture.raw, famepy.RawSeries):
+        elif fixture.obj.is_series:
             _read_series_case(r, database, fixture, s)
         else:
             _read_scalar_case(r, database, fixture, s)
 
-    def extra_checks(database: famepy.Database) -> None:
+    def extra_checks(database: famepy.FameDatabase) -> None:
         if "empty" in created:
             empty = _read(database, "empty")
-            r.equal("empty_series_is_empty", empty.is_empty, True)
+            r.equal("empty_series_is_empty", empty.is_empty(s.index_nc), True)
             r.equal(
                 "empty_quick_info",
                 famepy.quick_info(database, "empty").is_empty(s.index_nc),
@@ -1021,7 +1049,7 @@ def group_raw_matrix(ctx: Context) -> None:
             )
         if "p_series" in created:
             sub = _read(database, "p_series", first_index=first + 1, last_index=first + 2)
-            r.equal("subrange_read", sub.values, _series_values("p_series", s, first)[1:3])
+            r.equal("subrange_read", sub.data, _series_values("p_series", s, first)[1:3])
             r.equal("subrange_first_index", sub.first_index, first + 1)
         period = famepy.index_to_period(FREQUENCY_MONTHLY, first + 4, database=database)
         r.equal(
@@ -1031,7 +1059,7 @@ def group_raw_matrix(ctx: Context) -> None:
         )
 
     def read_all() -> None:
-        with famepy.open_database(path, session=session) as database:
+        with famepy.opendb(path, session=session) as database:
             # Each object's verification has its own exception boundary: a
             # failure inside it (classifier, metadata, explicit read) fails
             # that object, blocks only its unfinished cases and leaves the
@@ -1057,30 +1085,34 @@ def group_raw_matrix(ctx: Context) -> None:
     # Replacement and deletion use their own fixtures, created here, so they
     # never depend on an object whose creation may have failed above.
     def replace_flow() -> None:
-        with famepy.open_database(path, "update", session=session) as database:
-            nine = famepy.scalar("precision", 9.0)
-            one = famepy.scalar("precision", 1.0)
-            if r.ok("replace_fixture", lambda: famepy.write_object(database, "r_scalar", nine)):
-                status = 0
-                try:
-                    famepy.write_object(database, "r_scalar", one)
-                except famepy.FameError as error:
-                    status = error.status
+        with famepy.opendb(path, "update", session=session) as database:
+            nine = _scalar("r_scalar", "precision", 9.0)
+            one = _scalar("r_scalar", "precision", 1.0)
+            if r.ok("replace_fixture", lambda: famepy.do_write(nine, database)):
+                error = r.expect_error(
+                    "replace_opt_out",
+                    lambda: famepy.do_write(one, database, replace=False),
+                    (famepy.HLIError,),
+                )
+                status = error.status if isinstance(error, famepy.HLIError) else 0
                 r.fact("existing_name_status", status, note="status when creating an existing name")
+                r.expect(
+                    "replace_opt_out_unchanged",
+                    lambda: np.array([_read(database, "r_scalar").data]),
+                    np.array([9.0]),
+                )
                 if r.ok(
                     "replace_existing",
-                    lambda: famepy.write_object(database, "r_scalar", one, replace=True),
+                    lambda: famepy.do_write(one, database),
                 ):
                     r.equal(
                         "replace_value",
-                        np.array([_read(database, "r_scalar").value]),
+                        np.array([_read(database, "r_scalar").data]),
                         np.array([1.0]),
                     )
             if r.ok(
                 "delete_fixture",
-                lambda: famepy.write_object(
-                    database, "del_scalar", famepy.scalar("precision", 4.0)
-                ),
+                lambda: famepy.do_write(_scalar("del_scalar", "precision", 4.0), database),
             ):
                 r.check("delete_object", lambda: famepy.delete_object(database, "del_scalar"))
                 r.check(
@@ -1090,15 +1122,17 @@ def group_raw_matrix(ctx: Context) -> None:
                 r.expect_error(
                     "deleted_object_absent",
                     lambda: famepy.quick_info(database, "del_scalar"),
-                    (famepy.FameError,),
+                    (famepy.HLIError,),
                 )
-            r.check("post_after_replace", database.post)
+            r.check("post_after_replace", lambda: famepy.postdb(database))
 
     r.check("replace_and_delete", replace_flow)
     _block_missing(
         r,
         (
             "replace_fixture",
+            "replace_opt_out",
+            "replace_opt_out_unchanged",
             "replace_existing",
             "replace_value",
             "delete_fixture",
@@ -1152,25 +1186,23 @@ def group_discovery(ctx: Context) -> None:
     all_names = sorted([long_name, "CASE_S", "OTHER", "SALE", "SALES_A", "SALES_B"])
 
     def populate() -> None:
-        with famepy.open_database(path, "create", session=session) as database:
-            famepy.write_object(
-                database, "sales_a", famepy.series("precision", "monthly", first, np.zeros(2))
+        with famepy.opendb(path, "create", session=session) as database:
+            famepy.do_write(
+                _series("sales_a", "precision", "monthly", first, np.zeros(2)), database
             )
-            famepy.write_object(
-                database,
-                "sales_b",
-                famepy.series("numeric", "monthly", first, np.zeros(2, np.float32)),
+            famepy.do_write(
+                _series("sales_b", "numeric", "monthly", first, np.zeros(2, np.float32)), database
             )
-            famepy.write_object(database, "case_s", famepy.series("string", "case", 1, [b"a"]))
-            famepy.write_object(database, "sale", famepy.scalar("precision", 1.0))
-            famepy.write_object(database, "other", famepy.scalar("string", b"x"))
-            famepy.write_object(database, long_name, famepy.scalar("boolean", 1))
-            database.post()
+            famepy.do_write(_series("case_s", "string", "case", 1, [b"a"]), database)
+            famepy.do_write(_scalar("sale", "precision", 1.0), database)
+            famepy.do_write(_scalar("other", "string", b"x"), database)
+            famepy.do_write(_scalar(long_name, "boolean", 1), database)
+            famepy.postdb(database)
 
     r.check("populate", populate)
 
     def listing() -> None:
-        with famepy.open_database(path, session=session) as database:
+        with famepy.opendb(path, session=session) as database:
             _discovery_cases(r, database, all_names)
 
     r.check("listing", listing)
@@ -1178,56 +1210,56 @@ def group_discovery(ctx: Context) -> None:
     r.check("finalize", session.finalize)
 
 
-def _discovery_cases(r: Recorder, database: famepy.Database, all_names: list[str]) -> None:
+def _discovery_cases(r: Recorder, database: famepy.FameDatabase, all_names: list[str]) -> None:
     """One recorded case per listing call: a failure never hides the next predicate."""
 
-    def names(**filters: Any) -> Callable[[], list[str]]:
-        return lambda: sorted(i.name_text for i in famepy.list_objects(database, **filters))
+    def names(*wildcard: str, **filters: Any) -> Callable[[], list[str]]:
+        return lambda: sorted(i.name_text for i in famepy.listdb(database, *wildcard, **filters))
 
     r.expect("list_all", names(), all_names)
-    r.expect("wildcard_question", names(pattern="sales?"), ["SALES_A", "SALES_B"])
-    r.expect("wildcard_caret", names(pattern="sales_^"), ["SALES_A", "SALES_B"])
-    r.expect("filter_class_series", names(classes="series"), ["CASE_S", "SALES_A", "SALES_B"])
-    r.expect("filter_type_numeric", names(types="numeric"), ["SALES_B"])
+    r.expect("wildcard_question", names("sales?"), ["SALES_A", "SALES_B"])
+    r.expect("wildcard_caret", names("sales_^"), ["SALES_A", "SALES_B"])
+    r.expect("filter_class_series", names(class_="series"), ["CASE_S", "SALES_A", "SALES_B"])
+    r.expect("filter_type_numeric", names(type="numeric"), ["SALES_B"])
     # Frequency filtering is a metadata contract: exact frequencies only. The
     # native selection is narrowed with documented family/index words where
     # that cannot exclude a requested object, and left broad otherwise.
-    r.expect("filter_frequency_monthly", names(frequencies="monthly"), ["SALES_A", "SALES_B"])
-    r.expect("filter_frequency_case", names(frequencies="case"), ["CASE_S"])
+    r.expect("filter_frequency_monthly", names(freq="monthly"), ["SALES_A", "SALES_B"])
+    r.expect("filter_frequency_case", names(freq="case"), ["CASE_S"])
     r.expect(
         "filter_frequency_mixed",
-        names(frequencies=["monthly", "case"]),
+        names(freq=["monthly", "case"]),
         ["CASE_S", "SALES_A", "SALES_B"],
     )
-    r.expect("filter_frequency_code", names(frequencies=FREQUENCY_MONTHLY), ["SALES_A", "SALES_B"])
+    r.expect("filter_frequency_code", names(freq=FREQUENCY_MONTHLY), ["SALES_A", "SALES_B"])
     r.expect(
         "filter_frequency_with_class",
-        names(classes="series", frequencies="monthly"),
+        names(class_="series", freq="monthly"),
         ["SALES_A", "SALES_B"],
     )
     r.expect(
         "filter_frequency_excludes_scalars",
         lambda: [
             info.is_series and info.frequency == FREQUENCY_MONTHLY
-            for info in famepy.list_objects(database, frequencies="monthly")
+            for info in famepy.listdb(database, freq="monthly")
         ],
         [True, True],
     )
     r.expect_error(
         "filter_frequency_family_refused",
-        lambda: famepy.list_objects(database, frequencies="quarterly"),
+        lambda: famepy.listdb(database, freq="quarterly"),
         (ValueError,),
     )
     r.expect_error(
         "filter_frequency_invalid_refused",
-        lambda: famepy.list_objects(database, frequencies="monthly;drop"),
+        lambda: famepy.listdb(database, freq="monthly;drop"),
         (ValueError,),
     )
     scalars = [name for name in all_names if name not in ("CASE_S", "SALES_A", "SALES_B")]
-    r.expect("filter_frequency_undefined", names(frequencies="undefined"), scalars)
+    r.expect("filter_frequency_undefined", names(freq="undefined"), scalars)
     r.expect(
         "filter_frequency_undefined_with_monthly",
-        names(frequencies=["undefined", "monthly"]),
+        names(freq=["undefined", "monthly"]),
         sorted([*scalars, "SALES_A", "SALES_B"]),
     )
     # After a narrowed listing every option is back to ON: a broad listing
@@ -1235,9 +1267,7 @@ def _discovery_cases(r: Recorder, database: famepy.Database, all_names: list[str
     r.expect("options_normalized_after_listing", names(), all_names)
     r.fact(
         "scalar_frequency_codes",
-        _observe(
-            lambda: sorted({i.frequency for i in famepy.list_objects(database) if i.is_scalar})
-        ),
+        _observe(lambda: sorted({i.frequency for i in famepy.listdb(database) if i.is_scalar})),
     )
     # What the library's own selectors do to the wildcard without the package
     # filter: observations of the option semantics, isolated so that an
@@ -1256,32 +1286,32 @@ def _discovery_cases(r: Recorder, database: famepy.Database, all_names: list[str
             _observe(count),
             note="native wildcard count under this selection alone; no package filter",
         )
-    r.expect("alias_off_lists", lambda: len(famepy.list_objects(database, alias=False)) >= 6, True)
+    r.expect("alias_off_lists", lambda: len(famepy.listdb(database, alias=False)) >= 6, True)
 
     def scalar_range_agrees() -> bool:
-        listed = famepy.list_objects(database, "sale")[0]
+        listed = famepy.listdb(database, "sale")[0]
         info = famepy.quick_info(database, "sale")
         return [listed.first_index, listed.last_index] == [info.first_index, info.last_index]
 
     r.expect("scalar_range_from_quick_info", scalar_range_agrees, True)
     r.expect(
         "long_name_length",
-        lambda: max(len(i.name) for i in famepy.list_objects(database)),
+        lambda: max(len(i.name) for i in famepy.listdb(database)),
         NAME_CAPACITY,
     )
     r.expect_error(
         "truncation_reported",
-        lambda: famepy.list_objects(database, capacity=8),
+        lambda: famepy.listdb(database, capacity=8),
         (famepy.NameTruncatedError,),
     )
-    r.expect("listing_after_truncation_still_works", lambda: len(famepy.list_objects(database)), 6)
+    r.expect("listing_after_truncation_still_works", lambda: len(famepy.listdb(database)), 6)
 
 
 def _observe(function: Callable[[], Any]) -> Any:
     """Value of an observation, or the native status / error class when it fails."""
     try:
         return function()
-    except FameError as error:
+    except HLIError as error:
         return {"status": error.status}
     except Exception as error:  # noqa: BLE001 - observation only
         return {"error": type(error).__name__}
@@ -1319,7 +1349,7 @@ def group_commands(ctx: Context) -> None:
     temp = ctx.path("cmd-temp")
     temp.mkdir(exist_ok=True)
     output = r.check(
-        "display_command", lambda: famepy.run_command("display 2+2", session=session, temp_dir=temp)
+        "display_command", lambda: famepy.fame("display 2+2", session=session, temp_dir=temp)
     )
     r.equal(
         "display_evaluates",
@@ -1329,7 +1359,7 @@ def group_commands(ctx: Context) -> None:
     )
     quiet = r.check(
         "quiet_command",
-        lambda: famepy.run_command("display 2+2", session=session, quiet=True, temp_dir=temp),
+        lambda: famepy.fame("display 2+2", session=session, quiet=True, temp_dir=temp),
     )
     r.equal("quiet_returns_empty", quiet is not None and len(quiet) == 0, True)
     include = ctx.path("include.inp")
@@ -1338,9 +1368,7 @@ def group_commands(ctx: Context) -> None:
     nested.write_bytes(b"display 4+4")
     out = r.check(
         "input_expansion",
-        lambda: famepy.run_command(
-            "input include", session=session, base_dir=ctx.scratch, temp_dir=temp
-        ),
+        lambda: famepy.fame("input include", session=session, base_dir=ctx.scratch, temp_dir=temp),
     )
     r.equal(
         "input_expanded_evaluates",
@@ -1353,9 +1381,7 @@ def group_commands(ctx: Context) -> None:
     cycle_b.write_bytes(b"input cycle_a")
     r.expect_error(
         "input_cycle_refused",
-        lambda: famepy.run_command(
-            "input cycle_a", session=session, base_dir=ctx.scratch, temp_dir=temp
-        ),
+        lambda: famepy.fame("input cycle_a", session=session, base_dir=ctx.scratch, temp_dir=temp),
         (famepy.IncludeError,),
     )
     r.expect_error(
@@ -1365,7 +1391,7 @@ def group_commands(ctx: Context) -> None:
     )
     error = r.expect_error(
         "invalid_command_status",
-        lambda: famepy.run_command("fail 513", session=session, temp_dir=temp),
+        lambda: famepy.fame("fail 513", session=session, temp_dir=temp),
         (famepy.CommandError,),
     )
     r.equal("invalid_command_stage", getattr(error, "stage", None), "command")
@@ -1378,7 +1404,7 @@ def group_commands(ctx: Context) -> None:
     r.equal("temp_files_removed", len(list(temp.iterdir())), 0)
     r.check(
         "command_after_failure",
-        lambda: famepy.run_command("display 5+5", session=session, temp_dir=temp),
+        lambda: famepy.fame("display 5+5", session=session, temp_dir=temp),
     )
     r.expect_error(
         "extended_error_not_configured",
@@ -1423,7 +1449,7 @@ def group_extended_errors(ctx: Context) -> None:
     r.check("enable_retrieval", session.enable_extended_errors)
     error = r.expect_error(
         "failing_command_status",
-        lambda: famepy.run_command("fail 513", session=session, temp_dir=temp),
+        lambda: famepy.fame("fail 513", session=session, temp_dir=temp),
         (famepy.CommandError,),
     )
     text = getattr(error, "extended_text", None)
@@ -1443,14 +1469,14 @@ def group_extended_errors(ctx: Context) -> None:
         r.fact("extended_text_is_ascii", text.isascii())
     r.check(
         "command_after_capture",
-        lambda: famepy.run_command("display 6+6", session=session, temp_dir=temp),
+        lambda: famepy.fame("display 6+6", session=session, temp_dir=temp),
     )
     # A failing operation outside commands also captures under the lock;
     # whether the library has text for it is recorded, not assumed.
     missing = r.expect_error(
         "missing_database_status",
-        lambda: famepy.open_database(ctx.path("absent.db"), session=session),
-        (famepy.FameError,),
+        lambda: famepy.opendb(ctx.path("absent.db"), session=session),
+        (famepy.HLIError,),
     )
     other = getattr(missing, "extended_text", None)
     r.fact("missing_database_text_length", None if other is None else len(other))
@@ -1488,54 +1514,54 @@ def group_bridge(ctx: Context) -> None:
     ts = TSeries(mm(2020, 1), BRIDGE_VALUES.copy())
 
     def write() -> None:
-        bridge.write_tseries(path, "ts", ts, mode="create")
-        bridge.write_scalar(path, "sc", 2.5, mode="update")
-        bridge.write_scalar(path, "nan", math.nan, mode="update")
-        bridge.write_tseries(path, "empty", TSeries(mm(2020, 3), np.empty(0)), mode="update")
-        bridge.write_tseries(
+        _write(path, "ts", ts, mode="create")
+        _write(path, "sc", 2.5, mode="update")
+        _write(path, "nan", math.nan, mode="update")
+        _write(path, "empty", TSeries(mm(2020, 3), np.empty(0)), mode="update")
+        _write(
             path, "ref_empty", TSeries(mm(2020, 4), np.empty(0)), mode="update", empty="reference"
         )
 
     r.check("bridge_write", write)
 
     def read() -> None:
-        back = bridge.read_tseries(path, "ts")
+        back = _value(path, "ts")
         r.equal("firstdate", int(back.firstdate), int(ts.firstdate))
         r.equal("values_with_nan", np.array_equal(back.values, ts.values, equal_nan=True), True)
         r.expect_error(
             "strict_missing",
-            lambda: bridge.read_tseries(path, "ts", missing="strict"),
+            lambda: _value(path, "ts", missing="strict"),
             (bridge.MissingValueError,),
         )
-        r.equal("scalar", bridge.read_scalar(path, "sc"), 2.5)
-        r.equal("scalar_nan", math.isnan(bridge.read_scalar(path, "nan")), True)
+        r.equal("scalar", _value(path, "sc"), 2.5)
+        r.equal("scalar_nan", math.isnan(_value(path, "nan")), True)
         r.expect_error(
             "empty_needs_firstdate",
-            lambda: bridge.read_tseries(path, "empty"),
+            lambda: _value(path, "empty"),
             (bridge.EmptySeriesError,),
         )
         r.equal(
             "empty_with_firstdate",
-            len(bridge.read_tseries(path, "empty", empty_firstdate=mm(2020, 3))),
+            len(_value(path, "empty", empty_firstdate=mm(2020, 3))),
             0,
         )
-        r.equal("reference_empty_preserved", len(bridge.read_tseries(path, "ref_empty")), 1)
-        collapsed = bridge.read_tseries(path, "ref_empty", empty="reference")
+        r.equal("reference_empty_preserved", len(_value(path, "ref_empty")), 1)
+        collapsed = _value(path, "ref_empty", empty="reference")
         r.equal(
             "reference_empty_collapsed",
             [len(collapsed), int(collapsed.firstdate)],
             [0, int(mm(2020, 4))],
         )
-        with famepy.open_database(path, session=session) as database:
+        with famepy.opendb(path, session=session) as database:
             raw = _read(database, "ts")
             r.equal(
                 "nan_written_as_nc",
-                classify_by_sentinel(raw.values, "precision", session.sentinels).tolist(),
+                classify_by_sentinel(raw.data, "precision", session.sentinels).tolist(),
                 [0, 1, 0, 0, 0],
             )
             r.equal(
                 "nc_sentinel_value_matches",
-                np.array([raw.values[1]]),
+                np.array([raw.data[1]]),
                 np.array([sentinel_value("precision", 1, session.sentinels)]),
             )
 

@@ -29,23 +29,23 @@ from tsecon.dataecon import DataEconError, DataEconFile, open_dataecon
 from tsecon.frequencies import Frequency
 
 from .._constants import MISSING_NORMAL, ObjectClass, frequency_name
-from .._data import RawScalar, RawSeries, classify_by_sentinel, read_object
-from .._database import Database, open_database
-from .._errors import DataValidationError, FameError, UnsupportedOperationError
-from .._objects import ObjectInfo
+from .._data import RawScalar, RawSeries, classify_by_sentinel, read_named
+from .._database import FameDatabase, closedb, opendb
+from .._errors import DataValidationError, HLIError, UnsupportedOperationError
+from .._objects import FameObject
 from .._runtime import Session
 from .._text import TextEncodingError
-from .._wildcard import list_objects
+from .._wildcard import listdb
 from ..bridge import (
     DateSeries,
     NameList,
     StringSeries,
     UnsupportedFrequencyError,
     fame_frequency,
-    from_fame,
     is_supported_frequency,
     tsecon_frequency,
 )
+from ..bridge._values import from_fame
 from ._layout import (
     KINDS,
     LAYOUT_VERSION,
@@ -298,7 +298,7 @@ def _refused(
     )
 
 
-def _plan_entry(info: ObjectInfo, options: MigrationOptions, index_nc: int) -> PlanEntry:
+def _plan_entry(info: FameObject, options: MigrationOptions, index_nc: int) -> PlanEntry:
     name = info.name_text.upper()
     unsupported = "refuse" if options.unsupported == "refuse" else "skip"
     if info.class_code not in (ObjectClass.SERIES, ObjectClass.SCALAR):
@@ -418,16 +418,16 @@ def _plan_entry(info: ObjectInfo, options: MigrationOptions, index_nc: int) -> P
     )
 
 
-def _resolve(target: Any, session: Session | None) -> tuple[Database, bool]:
-    if isinstance(target, Database):
+def _resolve(target: Any, session: Session | None) -> tuple[FameDatabase, bool]:
+    if isinstance(target, FameDatabase):
         return target, False
     if isinstance(target, (str, bytes, os.PathLike)):
-        return open_database(target, "readonly", session=session), True
-    raise TypeError("Expected a Database or a database path.")
+        return opendb(target, "readonly", session=session), True
+    raise TypeError("Expected a FameDatabase or a database path.")
 
 
 def plan_migration(
-    source: Database | str | bytes | os.PathLike[str],
+    source: FameDatabase | str | bytes | os.PathLike[str],
     *,
     patterns: Sequence[str | bytes] = ("?",),
     options: MigrationOptions | None = None,
@@ -445,14 +445,14 @@ def plan_migration(
     database, owned = _resolve(source, session)
     try:
         index_nc = database.session.sentinels.index_nc
-        infos: dict[str, ObjectInfo] = {}
+        infos: dict[str, FameObject] = {}
         for pattern in patterns:
-            for info in list_objects(database, pattern, alias=False):
+            for info in listdb(database, pattern, alias=False):
                 infos.setdefault(info.name_text.upper(), info)
         entries = [_plan_entry(infos[name], selected, index_nc) for name in sorted(infos)]
     finally:
         if owned:
-            database.close()
+            closedb(database)
     seen: dict[str, str] = {}
     collided: set[str] = set()
     for entry in entries:
@@ -497,7 +497,7 @@ class _Converted:
     losses: tuple[str, ...]
 
 
-def _convert(raw: RawScalar | RawSeries, database: Database, options: MigrationOptions) -> Any:
+def _convert(raw: RawScalar | RawSeries, database: FameDatabase, options: MigrationOptions) -> Any:
     """Bridge value plus the raw categories; refuses unrepresentable data."""
     kind = raw.kind
     sentinels = database.session.sentinels
@@ -614,7 +614,7 @@ def _store(
 
 
 _OBJECT_ERRORS: tuple[type[Exception], ...] = (
-    FameError,
+    HLIError,
     DataValidationError,
     UnsupportedOperationError,
     UnsupportedFrequencyError,
@@ -679,7 +679,7 @@ def _check_plan(plan: MigrationPlan, source: Any, session: Session | None) -> No
 
 
 def migrate(
-    source: Database | str | bytes | os.PathLike[str],
+    source: FameDatabase | str | bytes | os.PathLike[str],
     destination: str | os.PathLike[str],
     *,
     patterns: Sequence[str | bytes] = ("?",),
@@ -749,7 +749,7 @@ def migrate(
                             stored += 1
                 finally:
                     if owned:
-                        database.close()
+                        closedb(database)
                 if stored == len(plan.stored) and not plan.skipped:
                     status = STATUS_COMPLETE
             finally:
@@ -763,10 +763,10 @@ def migrate(
 
 
 def _migrate_one(
-    db: DataEconFile, database: Database, entry: PlanEntry, options: MigrationOptions
+    db: DataEconFile, database: FameDatabase, entry: PlanEntry, options: MigrationOptions
 ) -> MigrationEntry:
     try:
-        raw = read_object(database, entry.name)
+        raw = read_named(database, entry.name)
         converted = _convert(raw, database, options)
         representation = _store(db, entry, converted, options, raw)
     except _OBJECT_ERRORS as error:

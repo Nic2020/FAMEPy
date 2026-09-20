@@ -5,7 +5,7 @@
 
 ITEM options are process-global inside the library and there is no declared
 call to read them back, so the package cannot restore an arbitrary prior
-state. ``list_objects`` therefore *normalizes* the five options it uses
+state. ``listdb`` therefore *normalizes* the five options it uses
 (CLASS, TYPE, FREQUENCY, INDEX, ALIAS) to ON when it finishes, whatever they
 were before. Commands that changed those options must set them again.
 
@@ -27,7 +27,9 @@ The result never depends on the native narrowing; any option error surfaces.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
+from typing import Any
 
 from ._constants import (
     FREQUENCY_CASE,
@@ -37,17 +39,17 @@ from ._constants import (
     ObjectType,
     frequency_code,
 )
-from ._database import Database
+from ._database import FameDatabase, closedb, opendb
 from ._errors import (
     HNOOBJ,
     HSUCC,
     HTRUNC,
     DataValidationError,
-    FameError,
+    HLIError,
     NameTruncatedError,
     check_status,
 )
-from ._objects import ObjectInfo, query_info
+from ._objects import FameObject, query_info
 from ._text import to_native
 
 _FILTERS = ("CLASS", "TYPE", "FREQUENCY", "INDEX")
@@ -132,53 +134,76 @@ def native_selectors(codes: set[int] | None) -> dict[str, list[bytes]]:
     return selectors
 
 
-def _normalize_options(native: object) -> list[FameError]:
+def _normalize_options(native: object) -> list[HLIError]:
     """Set every listing option to ON; attempt all of them and return failures."""
-    failures: list[FameError] = []
+    failures: list[HLIError] = []
     for name, value in NORMALIZED_OPTIONS:
         try:
             native.set_option(name, value)  # type: ignore[attr-defined]
-        except FameError as error:
+        except HLIError as error:
             failures.append(error)
     return failures
 
 
-def list_objects(
-    database: Database,
-    pattern: str | bytes = "?",
+def listdb(
+    db: FameDatabase | str | bytes | os.PathLike[str],
+    wildcard: str | bytes = "?",
     *,
     alias: bool = True,
-    classes: Iterable[str] | str | None = None,
-    types: Iterable[str] | str | None = None,
-    frequencies: Iterable[str | int] | str | int | None = None,
+    class_: Any = "",
+    type: Any = "",
+    freq: Any = "",
     capacity: int = NAME_CAPACITY,
-) -> list[ObjectInfo]:
-    """List objects matching ``pattern`` with optional class/type/frequency filters.
+) -> list[FameObject]:
+    """List the objects matching ``wildcard`` (``?`` any run, ``^`` one character).
 
-    The ITEM options are set for the listing and normalized to ON afterwards
-    within the same locked operation (see the module note). ``frequencies``
-    takes exact frequency names or codes; the result contains only objects
-    whose frequency code is one of them, whatever the native selection did
-    (a scalar has the undefined frequency and is listed only when that is
-    requested). Names longer than
-    ``capacity`` bytes raise NameTruncatedError with the returned length,
-    because the cursor cannot re-fetch that entry. Scalars are re-queried with
-    quick_info because the reference notes that wildcard ranges are unreliable
-    for them. Cleanup always frees the cursor and attempts every option reset,
-    even after a failure; the first failure is what propagates.
+    ``db`` is an open ``FameDatabase`` or a path, which is opened read-only
+    and closed afterwards. Returns one ``FameObject`` per match, without
+    data (``do_read`` fills it). The filters take the reference's spelling:
+    ``class_`` (``class`` is a Python keyword), ``type`` and ``freq``, each a
+    comma-separated string (``"series,scalar"``), a sequence, or ``""`` /
+    ``None`` for no filter. ``freq`` takes exact frequency names or codes and
+    is enforced on the listed metadata: an object is returned only when its
+    frequency code is one of those requested, whatever the native selection
+    did (a scalar has the undefined frequency and is listed only when that is
+    requested); a family word such as ``"quarterly"`` is refused, not
+    interpreted. The ITEM options are set for the listing and normalized to
+    ON afterwards within the same locked operation (see the module note).
+    Names longer than ``capacity`` bytes raise NameTruncatedError with the
+    returned length, because the cursor cannot re-fetch that entry. Scalars
+    are re-queried with quick_info because the reference notes that
+    wildcard ranges are unreliable for them. Cleanup always frees the cursor
+    and attempts every option reset, even after a failure; the first failure
+    is what propagates.
     """
-    text = to_native(pattern, what="wildcard pattern")
+    if not isinstance(db, FameDatabase):
+        if not isinstance(db, (str, bytes, os.PathLike)):
+            raise TypeError("listdb expects a FameDatabase or a database path.")
+        opened = opendb(db)
+        try:
+            return listdb(
+                opened,
+                wildcard,
+                alias=alias,
+                class_=class_,
+                type=type,
+                freq=freq,
+                capacity=capacity,
+            )
+        finally:
+            closedb(opened)
+    text = to_native(wildcard, what="wildcard pattern")
     if isinstance(capacity, bool) or not isinstance(capacity, int) or not 1 <= capacity <= 2**20:
         raise DataValidationError("Name capacity must be between 1 and 2**20 bytes.")
-    wanted_codes = _frequency_filter(frequencies)
+    wanted_codes = _frequency_filter(_filter_values(freq))
     filters = {
-        "CLASS": _values("CLASS", classes),
-        "TYPE": _values("TYPE", types),
+        "CLASS": _values("CLASS", _filter_values(class_)),
+        "TYPE": _values("TYPE", _filter_values(type)),
         **native_selectors(wanted_codes),
     }
-    results: list[ObjectInfo] = []
-    with database.operation("list objects") as native:
-        key = database.key
+    results: list[FameObject] = []
+    with db.operation("list objects") as native:
+        key = db.key
         failed = False
         try:
             native.set_option(b"ITEM ALIAS", b"ON" if alias else b"OFF")
@@ -203,7 +228,7 @@ def list_objects(
                         check_status(entry.status, operation="fame_get_next_wildcard")
                     if entry.returned_length < 0 or entry.returned_length > capacity:
                         raise NameTruncatedError(entry.returned_length, capacity)
-                    info = ObjectInfo(
+                    info = FameObject._from_codes(
                         entry.name,
                         entry.class_code,
                         entry.type_code,
@@ -218,8 +243,8 @@ def list_objects(
                     results.append(info)
             except BaseException as error:
                 cursor_failed = True
-                if isinstance(error, FameError):
-                    database.session._attach_extended_error(native, error)
+                if isinstance(error, HLIError):
+                    db.session._attach_extended_error(native, error)
                 raise
             finally:
                 try:
@@ -229,8 +254,8 @@ def list_objects(
                         raise
         except BaseException as error:
             failed = True
-            if isinstance(error, FameError):
-                database.session._attach_extended_error(native, error)
+            if isinstance(error, HLIError):
+                db.session._attach_extended_error(native, error)
             raise
         finally:
             cleanup_failures = _normalize_options(native)
@@ -239,14 +264,23 @@ def list_objects(
     return results
 
 
+def _filter_values(value: Any) -> Any:
+    """The reference's ``""`` (no filter) and ``None`` are the same; others pass through."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
 def native_listing_count(
-    database: Database, pattern: str | bytes, options: Iterable[tuple[bytes, bytes]]
+    database: FameDatabase, pattern: str | bytes, options: Iterable[tuple[bytes, bytes]]
 ) -> int:
     """How many entries the native wildcard yields under the given ITEM options.
 
     A validation-campaign observation helper: it applies no package-side
     filter, so it shows what the library's own option handling selected. The
-    options are normalized to ON afterwards, as ``list_objects`` does.
+    options are normalized to ON afterwards, as ``listdb`` does.
     """
     text = to_native(pattern, what="wildcard pattern")
     count = 0

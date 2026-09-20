@@ -17,7 +17,7 @@ Every fixture object is written with per-object containment (the report
 variant of the workspace write) and read as its own case: the primary
 failure of one object is recorded on its ``write:<name>`` case, only the
 cases that depend on that object are blocked, and every other object is
-still verified. The strict batch behavior of ``write_workspace`` is
+still verified. The strict batch behavior of ``writefame`` is
 exercised by the workspace group and the unit tests, never weakened here.
 """
 
@@ -33,7 +33,7 @@ from famepy import bridge
 from famepy._constants import FREQUENCIES, FREQUENCY_CASE, FREQUENCY_NAMES
 from famepy._data import classify_by_sentinel
 
-from ._manifest import _read, manifest_object, verify_case_ids
+from ._manifest import _read, _value, _write, manifest_object, verify_case_ids
 from ._report import Case
 
 if TYPE_CHECKING:
@@ -171,7 +171,7 @@ def contained_write(
     reports: list[Any] = []
 
     def write() -> list[str]:
-        report = bridge.write_workspace_report(target, workspace, **options)
+        report = bridge.writefame_report(target, workspace, **options)
         reports.append(report)
         return [str(failure) for failure in report.failures]
 
@@ -330,7 +330,7 @@ def group_frequencies(ctx: Context) -> None:
     stored = expected_precision_values(sentinels)
 
     def read_all() -> None:
-        with famepy.open_database(path, "readonly", session=session) as database:
+        with famepy.opendb(path, "readonly", session=session) as database:
             for code in CALENDAR_CODES:
                 label = _label(code)
                 first = bridge.mit_to_index(anchor_moment(code), session=session)
@@ -389,12 +389,13 @@ def group_frequencies(ctx: Context) -> None:
         _block(r, list(_frequency_case_ids()))
 
     def unsupported() -> None:
-        with famepy.open_database(path, "update", session=session) as database:
-            famepy.write_object(
-                database, "tenday", famepy.series("precision", "tenday", 5, np.zeros(2))
+        with famepy.opendb(path, "update", session=session) as database:
+            famepy.do_write(
+                famepy.FameObject("tenday", "series", "precision", "tenday", 5, data=np.zeros(2)),
+                database,
             )
-            database.post()
-        bridge.read_value(path, "tenday")
+            famepy.postdb(database)
+        _value(path, "tenday")
 
     r.expect_error(
         "unsupported_frequency_refused", unsupported, (bridge.UnsupportedFrequencyError,)
@@ -466,7 +467,7 @@ def case_value_cases(ctx: Context, path: Any) -> None:
     refused = (famepy.DataValidationError,)
     r.expect_error(
         "case_date_scalar_refused",
-        lambda: bridge.write_value(path, "case_date", case_moment, mode="update"),
+        lambda: _write(path, "case_date", case_moment, mode="update"),
         refused,
     )
     r.expect_error(
@@ -486,13 +487,13 @@ def case_value_cases(ctx: Context, path: Any) -> None:
     )
     r.expect_error(
         "raw_case_date_scalar_refused",
-        lambda: famepy.scalar("date", 5, date_frequency="case"),
+        lambda: famepy.FameObject("case_date", "scalar", "case", "undefined", data=5),
         refused,
     )
     r.expect_error(
         "raw_case_date_series_refused",
-        lambda: famepy.series(
-            "date", "monthly", ctx.first, np.array([5], dtype=np.int64), date_frequency="case"
+        lambda: famepy.FameObject(
+            "case_date", "series", "case", "monthly", ctx.first, data=np.array([5], dtype=np.int64)
         ),
         refused,
     )
@@ -503,16 +504,16 @@ def case_value_cases(ctx: Context, path: Any) -> None:
         outcomes: list[str] = []
         invalid = ts.Workspace(case_date=case_moment)
         for attempt in (
-            lambda: bridge.write_value(path, "case_date", case_moment, mode="update"),
-            lambda: bridge.write_scalar(path, "case_date", case_moment, mode="update"),
-            lambda: bridge.write_workspace(path, invalid, mode="update"),
+            lambda: _write(path, "case_date", case_moment, mode="update"),
+            lambda: _write(path, "case_date", case_moment, mode="update"),
+            lambda: famepy.writefame(path, invalid, mode="update"),
         ):
             try:
                 attempt()
                 outcomes.append("no error")
             except famepy.DataValidationError:
                 outcomes.append("refused")
-        report = bridge.write_workspace_report(path, invalid, mode="update")
+        report = bridge.writefame_report(path, invalid, mode="update")
         return [
             outcomes,
             list(report.written),
@@ -530,7 +531,7 @@ def case_value_cases(ctx: Context, path: Any) -> None:
 
     def library_status() -> int:
         """The library's status for an object typed by the case frequency."""
-        with famepy.open_database(path, "update", session=session) as database:
+        with famepy.opendb(path, "update", session=session) as database:
             with database.operation("new object") as native:
                 try:
                     native.new_object(
@@ -542,7 +543,7 @@ def case_value_cases(ctx: Context, path: Any) -> None:
                         int(famepy.Basis.DAILY),
                         int(famepy.Observed.UNDEFINED),
                     )
-                except famepy.FameError as error:
+                except famepy.HLIError as error:
                     return error.status
                 native.delete_object(database.key, b"CASE_TYPED")
             return 0
@@ -552,8 +553,8 @@ def case_value_cases(ctx: Context, path: Any) -> None:
 
 def _raw_series_record(database: Any, name: str, sentinels: Any) -> Any:
     raw = _read(database, name)
-    codes = classify_by_sentinel(raw.values, raw.kind, sentinels).tolist()
-    return [raw.frequency, raw.first_index, raw.values, codes]
+    codes = classify_by_sentinel(raw.data, raw.kind, sentinels).tolist()
+    return [raw.frequency, raw.first_index, raw.data, codes]
 
 
 def _raw_series_tail(database: Any, name: str, sentinels: Any) -> Any:
@@ -562,20 +563,20 @@ def _raw_series_tail(database: Any, name: str, sentinels: Any) -> Any:
 
 def _raw_scalar_record(database: Any, name: str) -> Any:
     raw = _read(database, name)
-    return [raw.type_code, int(raw.value)]
+    return [raw.type_code, int(raw.data)]
 
 
 def _bridge_series_record(database: Any, name: str) -> Any:
-    series = bridge.read_value(database, name)
+    series = _value(database, name)
     return [int(series.firstdate), bridge.fame_frequency(series.frequency), series.values]
 
 
 def _bridge_mit_record(database: Any, name: str) -> Any:
-    return _mit_record(bridge.read_value(database, name))
+    return _mit_record(_value(database, name))
 
 
 def _bridge_dates_record(database: Any, name: str) -> Any:
-    return _dates_record(bridge.read_value(database, name))
+    return _dates_record(_value(database, name))
 
 
 def _mit_record(value: Any) -> Any:
@@ -718,8 +719,8 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
         return f"{KIND_PREFIX}{glue}{name}"
 
     def read_kind(name: str) -> Any:
-        with famepy.open_database(path, "readonly", session=session) as database:
-            return record(name, bridge.read_value(database, object_name(name)))
+        with famepy.opendb(path, "readonly", session=session) as database:
+            return record(name, _value(database, object_name(name)))
 
     for name in kinds:
         if object_name(name) in written:
@@ -729,7 +730,7 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
 
     def reserved_status() -> int:
         """The library's status for a reserved word used as an object name."""
-        with famepy.open_database(path, "update", session=session) as database:
+        with famepy.opendb(path, "update", session=session) as database:
             with database.operation("new object") as native:
                 try:
                     native.new_object(
@@ -741,7 +742,7 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
                         int(famepy.Basis.DAILY),
                         int(famepy.Observed.UNDEFINED),
                     )
-                except famepy.FameError as error:
+                except famepy.HLIError as error:
                     return error.status
                 native.delete_object(database.key, b"NAMELIST")
             return 0
@@ -764,22 +765,22 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
             else:
                 dtype = np.float64 if kind == "precision" else np.float32
                 values = np.array([1.0, sentinel, 2.0], dtype=dtype)
-            raw_missing[name] = famepy.series(
-                kind, "monthly", first, values, date_frequency="monthly" if kind == "date" else None
+            raw_missing[name] = famepy.FameObject(
+                name, "series", "monthly" if kind == "date" else kind, "monthly", first, data=values
             )
 
     def write_missing() -> None:
-        with famepy.open_database(path, "update", session=session) as database:
-            for name, raw in raw_missing.items():
-                famepy.write_object(database, name, raw, replace=True)
-            database.post()
+        with famepy.opendb(path, "update", session=session) as database:
+            for raw in raw_missing.values():
+                famepy.do_write(raw, database, replace=True)
+            famepy.postdb(database)
 
     r.check("write_missing_matrix", write_missing)
-    with famepy.open_database(path, "readonly", session=session) as database:
+    with famepy.opendb(path, "readonly", session=session) as database:
         for name, raw in raw_missing.items():
             kind_name, category_name = name[2:].rsplit("_", 1)
             code = _CATEGORY[category_name]
-            expected_values: Any = raw.values if raw.kind != "string" else list(raw.values)
+            expected_values: Any = raw.data if raw.kind != "string" else list(raw.data)
             r.expect(
                 f"missing_raw:{kind_name}:{category_name}",
                 partial(_raw_series_tail, database, name, s),
@@ -800,7 +801,7 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
             name = f"m_{kind}_{category}"
 
             def read(name: str = name, kind: str = kind) -> Any:
-                value = bridge.read_value(path, name)
+                value = _value(path, name)
                 if kind in ("precision", "numeric"):
                     return [bool(np.isnan(value.values[1])), float(value.values[0])]
                 if kind == "date":
@@ -817,14 +818,14 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
                 r.expect(f"missing:{kind}:{category}", read, [True, 1.0])
     r.expect_error(
         "missing_strict_refused",
-        lambda: bridge.read_value(path, "m_precision_na", missing="strict"),
+        lambda: _value(path, "m_precision_na", missing="strict"),
         (bridge.MissingValueError,),
     )
 
     def never_true() -> Any:
-        with famepy.open_database(path, "readonly", session=session) as database:
+        with famepy.opendb(path, "readonly", session=session) as database:
             raw = _read(database, "m_boolean_nc")
-            return classify_by_sentinel(raw.values, "boolean", s).tolist()
+            return classify_by_sentinel(raw.data, "boolean", s).tolist()
 
     r.expect("boolean_missing_never_true", never_true, [0, 1, 0])
 
@@ -839,8 +840,8 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
     )
 
     def write_empties() -> None:
-        bridge.write_workspace(path, empties, mode="update", empty="reference")
-        bridge.write_value(path, "t0", ts.TSeries(ts.qq(1995, 1), np.empty(0)), mode="update")
+        famepy.writefame(path, empties, mode="update", empty="reference")
+        _write(path, "t0", ts.TSeries(ts.qq(1995, 1), np.empty(0)), mode="update")
 
     r.check("write_empty_matrix", write_empties)
     expected_empty = {
@@ -854,7 +855,7 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
     for name in empties:
 
         def read_empty(name: str = name) -> Any:
-            value = bridge.read_value(path, name, empty="reference")
+            value = _value(path, name, empty="reference")
             if isinstance(value, bridge.DateSeries):
                 return [
                     int(value.firstdate),
@@ -866,7 +867,7 @@ def bridge_value_cases(ctx: Context, path: Any) -> None:
         r.expect(f"empty:{name}", read_empty, expected_empty[name])
     r.expect_error(
         "empty_preserve_needs_firstdate",
-        lambda: bridge.read_value(path, "t0"),
+        lambda: _value(path, "t0"),
         (bridge.EmptySeriesError,),
     )
 
@@ -922,16 +923,16 @@ def group_workspace(ctx: Context) -> None:
     path = ctx.path("workspace.db")
     reference = reference_workspace()
 
-    r.check("write_reference", lambda: bridge.write_workspace(path, reference, mode="create"))
+    r.check("write_reference", lambda: famepy.writefame(path, reference, mode="create"))
     r.expect("listing_count", lambda: len(_upper_names(path, session)), 7)
 
     def keys(*names: Any, **options: Any) -> Any:
-        return lambda: list(bridge.read_workspace(path, *names, **options))
+        return lambda: list(famepy.readfame(path, *names, **options))
 
     r.expect("read_all", keys(), ["a", "b", "c_alpha", "c_beta", "c_n_s", "s_p", "s_q"])
 
     def all_values() -> Any:
-        w = bridge.read_workspace(path)
+        w = famepy.readfame(path)
         return [
             w.a,
             int(w.b.firstdate),
@@ -960,7 +961,7 @@ def group_workspace(ctx: Context) -> None:
     first_b = bridge.mit_to_index(ts.qq(2020, 1), session=session)
 
     def b_raw() -> Any:
-        with famepy.open_database(path, "readonly", session=session) as database:
+        with famepy.opendb(path, "readonly", session=session) as database:
             return _raw_series_record(database, "B", session.sentinels)
 
     r.expect(
@@ -973,13 +974,13 @@ def group_workspace(ctx: Context) -> None:
     r.expect("read_wildcard_prefix", keys("s?", prefix="s"), ["p", "q"])
 
     def collect_one() -> Any:
-        w = bridge.read_workspace(path, "c?", collect="c")
+        w = famepy.readfame(path, "c?", collect="c")
         return [list(w), list(w.c)]
 
     r.expect("read_collect", collect_one, [["c"], ["alpha", "beta", "n_s"]])
 
     def nested() -> Any:
-        w = bridge.read_workspace(path, collect=[("c", ["n"]), "s"])
+        w = famepy.readfame(path, collect=[("c", ["n"]), "s"])
         return [list(w), list(w.c), list(w.c.n), list(w.s), w.c.n.s]
 
     r.expect(
@@ -990,39 +991,43 @@ def group_workspace(ctx: Context) -> None:
     r.expect("read_prefix_all", keys(prefix="c"), ["a", "b", "alpha", "beta", "n_s", "s_p", "s_q"])
 
     def add_colliders() -> None:
-        bridge.write_workspace(path, ts.Workspace(c_x=1.0, x=2.0, c=3.0), mode="update")
+        famepy.writefame(path, ts.Workspace(c_x=1.0, x=2.0, c=3.0), mode="update")
 
     r.check("write_colliders", add_colliders)
     r.expect_error(
         "collision_refused",
-        lambda: bridge.read_workspace(path, "c_x", "x", prefix="c"),
+        lambda: famepy.readfame(path, "c_x", "x", prefix="c"),
         (bridge.NameCollisionError,),
     )
     r.expect_error(
         "branch_collision_refused",
-        lambda: bridge.read_workspace(path, "c", "c_alpha", collect="c"),
+        lambda: famepy.readfame(path, "c", "c_alpha", collect="c"),
         (bridge.NameCollisionError,),
     )
     r.expect_error(
         "absent_name_status",
-        lambda: bridge.read_workspace(path, "no_such_object"),
-        (famepy.FameError,),
+        lambda: famepy.readfame(path, "no_such_object"),
+        (famepy.HLIError,),
     )
 
     def add_unconvertible() -> None:
-        with famepy.open_database(path, "update", session=session) as database:
-            famepy.write_object(
-                database, "u_tenday", famepy.series("precision", "tenday", 3, np.zeros(2))
+        with famepy.opendb(path, "update", session=session) as database:
+            famepy.do_write(
+                famepy.FameObject("u_tenday", "series", "precision", "tenday", 3, data=np.zeros(2)),
+                database,
             )
-            famepy.write_object(
-                database, "u_bool", famepy.scalar("boolean", session.sentinels.boolean_nc)
+            famepy.do_write(
+                famepy.FameObject(
+                    "u_bool", "scalar", "boolean", "undefined", data=session.sentinels.boolean_nc
+                ),
+                database,
             )
-            database.post()
+            famepy.postdb(database)
 
     r.check("write_unconvertible", add_unconvertible)
 
     def report() -> Any:
-        rep = bridge.read_workspace_report(path, "u?")
+        rep = bridge.readfame_report(path, "u?")
         return [list(rep.workspace), [str(f) for f in rep.failures], rep.complete]
 
     r.expect(
@@ -1032,7 +1037,7 @@ def group_workspace(ctx: Context) -> None:
     )
 
     def fallback() -> Any:
-        rep = bridge.read_workspace_report(path, "u?", raw_fallback=True)
+        rep = bridge.readfame_report(path, "u?", raw_fallback=True)
         return [
             list(rep.workspace),
             list(rep.raw),
@@ -1044,11 +1049,11 @@ def group_workspace(ctx: Context) -> None:
     r.expect(
         "report_raw_fallback",
         fallback,
-        [["u_bool", "u_tenday"], ["U_BOOL", "U_TENDAY"], True, FREQUENCIES["tenday"], "RawScalar"],
+        [["u_bool", "u_tenday"], ["U_BOOL", "U_TENDAY"], True, FREQUENCIES["tenday"], "FameObject"],
     )
 
     def write_report() -> Any:
-        rep = bridge.write_workspace_report(
+        rep = bridge.writefame_report(
             path, ts.Workspace(r1=1.0, r2=ts.TSeries(ts.mm(2021, 1), [np.nan])), mode="update"
         )
         return [list(rep.written), len(rep.failures), rep.posted, rep.complete]
@@ -1057,17 +1062,17 @@ def group_workspace(ctx: Context) -> None:
 
     def multiple() -> Any:
         m = ts.MVTSeries(ts.mm(2020, 1), ("x", "y"), np.ones((2, 2)))
-        bridge.write_workspace(
+        famepy.writefame(
             path, ts.Workspace(a=1.0), m, {"d": ts.qq(2020, 1)}, mode="update", prefix="in"
         )
-        return list(bridge.read_workspace(path, "in_?"))
+        return list(famepy.readfame(path, "in_?"))
 
     r.expect("write_multiple_inputs", multiple, ["in_a", "in_d", "in_x", "in_y"])
 
     def nan_codes() -> Any:
-        with famepy.open_database(path, "readonly", session=session) as database:
+        with famepy.opendb(path, "readonly", session=session) as database:
             raw = _read(database, "r2")
-            return classify_by_sentinel(raw.values, "precision", session.sentinels).tolist()
+            return classify_by_sentinel(raw.data, "precision", session.sentinels).tolist()
 
     r.expect("nan_written_as_nc_series", nan_codes, [1])
 
@@ -1113,5 +1118,5 @@ def group_workspace(ctx: Context) -> None:
 
 
 def _upper_names(path: Any, session: Any) -> set[str]:
-    with famepy.open_database(path, "readonly", session=session) as database:
-        return {info.name_text.upper() for info in famepy.list_objects(database)}
+    with famepy.opendb(path, "readonly", session=session) as database:
+        return {info.name_text.upper() for info in famepy.listdb(database)}

@@ -188,7 +188,7 @@ primary error and status, only the cases that depend on that object are
 `blocked` (`object not written`), and every other object is still written,
 read, checked raw and verified across processes. Blocked and missing cases
 never count as passes: every per-object case is in the required list. The
-strict batch behavior of `write_workspace` (first failure raises, nothing
+strict batch behavior of `writefame` (first failure raises, nothing
 posted) is covered by the `workspace` group and the unit tests and is not
 weakened by this containment. The offline backends model two library
 boundaries so that an invalid fixture cannot pass offline and fail natively:

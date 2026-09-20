@@ -7,14 +7,15 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from canonical import read, scalar_object, series_object, value, write
 from tsecon import TSeries, mm
 
 import famepy
-from famepy import FameError, SymbolNotFoundError, bridge, diagnose
-from famepy._abi import C, FameRange, layout
+from famepy import HLIError, SymbolNotFoundError, diagnose
+from famepy._abi import C, RangeStruct, layout
 from famepy._binding import Binding
 from famepy._constants import FREQUENCY_MONTHLY, NAME_CAPACITY
-from famepy._native import CtypesNative, RangeSpec
+from famepy._native import CtypesNative, FameRange
 from famepy._runtime import ExtendedErrorRetrieval, Session
 
 pytestmark = pytest.mark.native_shim
@@ -55,9 +56,9 @@ def session(native):
 
 @pytest.fixture
 def db(session):
-    database = famepy.open_database("synthetic-shim.db", "create", session=session)
+    database = famepy.opendb("synthetic-shim.db", "create", session=session)
     yield database
-    database.close()
+    famepy.closedb(database)
 
 
 def test_layout_against_compiler(library):
@@ -73,7 +74,7 @@ def test_layout_against_compiler(library):
 def test_status_pointer_and_return(native, library):
     binding = native.binding
     key = ct.c_int32()
-    with pytest.raises(FameError) as error:
+    with pytest.raises(HLIError) as error:
         binding.call("cfmopdb", ct.byref(key), ct.create_string_buffer(b"synthetic"), 1)
     assert error.value.status == 901
     binding.call("cfmini")
@@ -82,7 +83,7 @@ def test_status_pointer_and_return(native, library):
     assert version.value == 4.25
     binding.call("cfmopdb", ct.byref(key), ct.create_string_buffer(b"synthetic"), 2)
     assert key.value >= 0
-    with pytest.raises(FameError) as error:
+    with pytest.raises(HLIError) as error:
         binding.call("cfmopdb", ct.byref(key), ct.create_string_buffer(b"synthetic"), 9)
     assert error.value.status == 910
     assert binding.call_status("cfmfin") == 0
@@ -106,10 +107,10 @@ def test_lifetime_counters_and_fault_injection(native, library):
     assert helper(library, "shim_initialized")() == 1
     assert session.version() == 4.25
     helper(library, "shim_fail_next", None, [ct.c_int32])(77)
-    with pytest.raises(FameError) as error:
-        famepy.work_database(session=session)
+    with pytest.raises(HLIError) as error:
+        famepy.workdb(session=session)
     assert error.value.status == 77
-    work = famepy.work_database(session=session)
+    work = famepy.workdb(session=session)
     assert helper(library, "shim_open_databases")() == 1
     session.finalize()
     assert helper(library, "shim_initialized")() == 0
@@ -132,25 +133,25 @@ def test_globals_are_read_with_declared_types(session):
 
 def test_bulk_numpy_buffers_and_scalar_range(db, native):
     values = np.array([1.5, 2.5, 3.5, 4.5])
-    famepy.write_object(db, "s", famepy.series("precision", FREQUENCY_MONTHLY, 100, values))
+    famepy.do_write(series_object("s", "precision", FREQUENCY_MONTHLY, 100, values), db)
     out = np.full(6, -99.0)
     view = out[1:5]
-    native.get_precisions(db.key, b"S", RangeSpec(FREQUENCY_MONTHLY, 100, 103), view)
+    native.get_precisions(db.key, b"S", FameRange(FREQUENCY_MONTHLY, 100, 103), view)
     assert out.tolist() == [-99, 1.5, 2.5, 3.5, 4.5, -99]
-    raw = famepy.read_object(db, "s", first_index=101, last_index=102)
-    assert raw.values.tolist() == [2.5, 3.5]
-    famepy.write_object(db, "sc", famepy.scalar("precision", 12.5))
+    raw = read(db, "s", first_index=101, last_index=102)
+    assert raw.data.tolist() == [2.5, 3.5]
+    famepy.do_write(scalar_object("sc", "precision", 12.5), db)
     scalar = np.empty(1)
     native.get_precisions(db.key, b"SC", None, scalar)
     assert scalar[0] == 12.5
-    with pytest.raises(FameError) as error:
-        native.get_precisions(db.key, b"S", RangeSpec(FREQUENCY_MONTHLY, 90, 91), np.empty(2))
+    with pytest.raises(HLIError) as error:
+        native.get_precisions(db.key, b"S", FameRange(FREQUENCY_MONTHLY, 90, 91), np.empty(2))
     assert error.value.status == 908
     with pytest.raises(famepy.DataValidationError):
-        native.get_precisions(db.key, b"S", RangeSpec(FREQUENCY_MONTHLY, 100, 103), np.empty(3))
+        native.get_precisions(db.key, b"S", FameRange(FREQUENCY_MONTHLY, 100, 103), np.empty(3))
     with pytest.raises(famepy.DataValidationError):
         native.get_precisions(
-            db.key, b"S", RangeSpec(FREQUENCY_MONTHLY, 100, 103), np.empty(4, dtype=np.float32)
+            db.key, b"S", FameRange(FREQUENCY_MONTHLY, 100, 103), np.empty(4, dtype=np.float32)
         )
 
 
@@ -163,97 +164,96 @@ def test_every_kind_round_trips_through_the_shim(db, session):
     boolean = np.array([1, 0, sentinels.boolean_nd], dtype=np.int32)
     dates = np.array([24240, sentinels.index_na], dtype=np.int64)
     strings = [b"alpha", b"", session.sentinels.string_nc]
-    famepy.write_object(db, "p", famepy.series("precision", "monthly", 10, precision))
-    famepy.write_object(db, "n", famepy.series("numeric", "monthly", 10, numeric))
-    famepy.write_object(db, "b", famepy.series("boolean", "monthly", 10, boolean))
-    famepy.write_object(db, "d", famepy.series("date", "monthly", 10, dates, date_frequency=129))
-    famepy.write_object(db, "s", famepy.series("string", "case", 1, strings))
-    famepy.write_object(db, "nl", famepy.scalar("namelist", b"{A,B}"))
-    famepy.write_object(db, "ss", famepy.scalar("string", b"hello world"))
-    famepy.write_object(db, "ds", famepy.scalar("date", 5, date_frequency=129))
-    famepy.write_object(db, "e", famepy.series("precision", "monthly", 0, np.empty(0)))
-    db.post()
-    db.close()
-    with famepy.open_database("synthetic-shim.db", "readonly", session=session) as reopened:
-        got = famepy.read_object(reopened, "p")
-        assert np.array_equal(got.values.view(np.uint64), precision.view(np.uint64))
-        assert famepy.classify_by_sentinel(got.values, "precision", sentinels).tolist() == [
+    famepy.do_write(series_object("p", "precision", "monthly", 10, precision), db)
+    famepy.do_write(series_object("n", "numeric", "monthly", 10, numeric), db)
+    famepy.do_write(series_object("b", "boolean", "monthly", 10, boolean), db)
+    famepy.do_write(series_object("d", "date", "monthly", 10, dates, date_frequency=129), db)
+    famepy.do_write(series_object("s", "string", "case", 1, strings), db)
+    famepy.do_write(scalar_object("nl", "namelist", b"{A,B}"), db)
+    famepy.do_write(scalar_object("ss", "string", b"hello world"), db)
+    famepy.do_write(scalar_object("ds", "date", 5, date_frequency=129), db)
+    famepy.do_write(series_object("e", "precision", "monthly", 0, np.empty(0)), db)
+    famepy.postdb(db)
+    famepy.closedb(db)
+    with famepy.opendb("synthetic-shim.db", "readonly", session=session) as reopened:
+        got = read(reopened, "p")
+        assert np.array_equal(got.data.view(np.uint64), precision.view(np.uint64))
+        assert famepy.classify_by_sentinel(got.data, "precision", sentinels).tolist() == [
             0,
             1,
             2,
             3,
         ]
-        assert [famepy.missing_type(reopened, "precision", v) for v in got.values] == [0, 1, 2, 3]
-        assert (
-            famepy.read_object(reopened, "n").values.view(np.uint32).tolist()
-            == numeric.view(np.uint32).tolist()
-        )
-        assert famepy.read_object(reopened, "b").values.tolist() == boolean.tolist()
-        assert famepy.read_object(reopened, "d").values.tolist() == dates.tolist()
+        assert [famepy.missing_type(reopened, "precision", v) for v in got.data] == [0, 1, 2, 3]
+        assert read(reopened, "n").data.view(np.uint32).tolist() == numeric.view(np.uint32).tolist()
+        assert read(reopened, "b").data.tolist() == boolean.tolist()
+        assert read(reopened, "d").data.tolist() == dates.tolist()
         assert famepy.missing_type(reopened, "date", int(dates[1])) == 2
-        assert famepy.read_object(reopened, "s").values == strings
+        assert read(reopened, "s").data == strings
         assert famepy.missing_type(reopened, "string", session.sentinels.string_nc) == 1
         assert famepy.missing_type(reopened, "string", b"NC") == 0
-        assert famepy.read_object(reopened, "nl").value == b"{A,B}"
-        assert famepy.read_object(reopened, "ss").value == b"hello world"
-        assert famepy.read_object(reopened, "ds") == famepy.RawScalar("date", 5, 129)
-        empty = famepy.read_object(reopened, "e")
-        assert empty.is_empty and famepy.quick_info(reopened, "e").is_empty(sentinels.index_nc)
+        assert read(reopened, "nl").data == b"{A,B}"
+        assert read(reopened, "ss").data == b"hello world"
+        ds = read(reopened, "ds")
+        assert (ds.kind, ds.type_code, int(ds.data)) == ("date", 129, 5)
+        empty = read(reopened, "e")
+        assert empty.is_empty(sentinels.index_nc)
+        assert famepy.quick_info(reopened, "e").is_empty(sentinels.index_nc)
         with pytest.raises(famepy.DataValidationError):
-            famepy.write_object(reopened, "x", famepy.scalar("precision", 1.0))
+            famepy.do_write(scalar_object("x", "precision", 1.0), reopened)
 
 
 def test_close_without_post_discards_in_shim(session):
-    database = famepy.open_database("discard.db", "create", session=session)
-    famepy.write_object(database, "kept", famepy.scalar("precision", 1.0))
-    database.post()
-    famepy.write_object(database, "lost", famepy.scalar("precision", 2.0))
-    database.close()
-    with famepy.open_database("discard.db", session=session) as reopened:
-        assert [i.name_text for i in famepy.list_objects(reopened)] == ["KEPT"]
+    database = famepy.opendb("discard.db", "create", session=session)
+    famepy.do_write(scalar_object("kept", "precision", 1.0), database)
+    famepy.postdb(database)
+    famepy.do_write(scalar_object("lost", "precision", 2.0), database)
+    famepy.closedb(database)
+    with famepy.opendb("discard.db", session=session) as reopened:
+        assert [i.name_text for i in famepy.listdb(reopened)] == ["KEPT"]
 
 
 def test_writable_string_pointer_array(db, native):
-    famepy.write_object(db, "s", famepy.series("string", "case", 1, [b"abc", b"xy"]))
+    famepy.do_write(series_object("s", "string", "case", 1, [b"abc", b"xy"]), db)
     left, right = ct.create_string_buffer(4), ct.create_string_buffer(3)
     pointers = (C * 2)(ct.cast(left, C), ct.cast(right, C))
     lengths = (ct.c_int32 * 2)(3, 2)
-    range_ = FameRange(232, 1, 2)
+    range_ = RangeStruct(232, 1, 2)
     native.binding.call("fame_get_strings", db.key, b"S", ct.byref(range_), pointers, lengths, None)
     assert (left.value, right.value) == (b"abc", b"xy")
     assert list(lengths) == [3, 2]
-    assert native.get_strings(db.key, b"S", RangeSpec(232, 1, 2), 2) == [b"abc", b"xy"]
+    assert native.get_strings(db.key, b"S", FameRange(232, 1, 2), 2) == [b"abc", b"xy"]
     with pytest.raises(famepy.DataValidationError):
-        native.write_strings(db.key, b"S", RangeSpec(232, 1, 2), [b"a\0b", b"c"])
+        native.write_strings(db.key, b"S", FameRange(232, 1, 2), [b"a\0b", b"c"])
 
 
 def test_wildcards_truncation_and_cursor_cleanup(db, library):
     long_name = "L" * NAME_CAPACITY
-    famepy.write_object(db, long_name, famepy.scalar("precision", 1.0))
-    famepy.write_object(db, "sales_a", famepy.series("precision", "monthly", 0, np.zeros(1)))
-    famepy.write_object(db, "sales_b", famepy.scalar("numeric", 1.0))
-    names = [i.name_text for i in famepy.list_objects(db)]
+    famepy.do_write(scalar_object(long_name, "precision", 1.0), db)
+    famepy.do_write(series_object("sales_a", "precision", "monthly", 0, np.zeros(1)), db)
+    famepy.do_write(scalar_object("sales_b", "numeric", 1.0), db)
+    names = [i.name_text for i in famepy.listdb(db)]
     assert names == [long_name, "SALES_A", "SALES_B"]
-    assert [i.name_text for i in famepy.list_objects(db, "sales?")] == ["SALES_A", "SALES_B"]
-    assert [i.name_text for i in famepy.list_objects(db, "sales_^")] == ["SALES_A", "SALES_B"]
-    assert [i.name_text for i in famepy.list_objects(db, classes="series")] == ["SALES_A"]
-    assert [i.name_text for i in famepy.list_objects(db, types="numeric")] == ["SALES_B"]
-    assert [i.name_text for i in famepy.list_objects(db, frequencies="monthly")] == ["SALES_A"]
-    scalar_info = famepy.list_objects(db, "sales_b")[0]
+    assert [i.name_text for i in famepy.listdb(db, "sales?")] == ["SALES_A", "SALES_B"]
+    assert [i.name_text for i in famepy.listdb(db, "sales_^")] == ["SALES_A", "SALES_B"]
+    assert [i.name_text for i in famepy.listdb(db, class_="series")] == ["SALES_A"]
+    assert [i.name_text for i in famepy.listdb(db, type="numeric")] == ["SALES_B"]
+    assert [i.name_text for i in famepy.listdb(db, freq="monthly")] == ["SALES_A"]
+    scalar_info = famepy.listdb(db, "sales_b")[0]
     assert (scalar_info.first_index, scalar_info.last_index) == (0, 0)
     with pytest.raises(famepy.NameTruncatedError) as error:
-        famepy.list_objects(db, capacity=8)
+        famepy.listdb(db, capacity=8)
     assert error.value.returned_length == NAME_CAPACITY
     assert helper(library, "shim_active_cursors")() == 0
 
 
 def test_commands_output_and_cleanup(session, library, tmp_path):
-    output = famepy.run_command("display 1", session=session, temp_dir=tmp_path)
+    output = famepy.fame("display 1", session=session, temp_dir=tmp_path)
     assert output == b"echo: display 1\n"
-    assert famepy.run_command("display 2+2", session=session, temp_dir=tmp_path) == b"4\n"
+    assert famepy.fame("display 2+2", session=session, temp_dir=tmp_path) == b"4\n"
     assert helper(library, "shim_output_redirected")() == 0
     with pytest.raises(famepy.CommandError) as error:
-        famepy.run_command("fail 513", session=session, temp_dir=tmp_path)
+        famepy.fame("fail 513", session=session, temp_dir=tmp_path)
     assert error.value.status == 513
     assert error.value.output == b"partial output before failure\n"
     assert helper(library, "shim_output_redirected")() == 0
@@ -269,7 +269,7 @@ def test_extended_error_mechanics_with_shim_declared_lengths(session, library, t
     with pytest.raises(famepy.RuntimeStateError):
         session.extended_error_text()
     with pytest.raises(famepy.CommandError) as error:
-        famepy.run_command("fail", session=session, temp_dir=tmp_path)
+        famepy.fame("fail", session=session, temp_dir=tmp_path)
     assert error.value.extended_text == b"synthetic failure for fail"
     assert "synthetic" not in str(error.value)
     assert session.extended_error_text() == b"synthetic failure for fail"
@@ -286,12 +286,12 @@ def test_extended_error_mechanics_with_shim_declared_lengths(session, library, t
 
 def test_bridge_round_trip_through_shim(session):
     ts = TSeries(mm(2020, 1), [1.0, np.nan, 3.0])
-    bridge.write_tseries("bridge.db", "ts", ts, mode="create")
-    back = bridge.read_tseries("bridge.db", "ts")
+    write("bridge.db", "ts", ts, mode="create")
+    back = value("bridge.db", "ts")
     assert back.firstdate == mm(2020, 1)
     assert np.array_equal(back.values, ts.values, equal_nan=True)
-    bridge.write_scalar("bridge.db", "sc", 2.0, mode="update")
-    assert bridge.read_scalar("bridge.db", "sc") == 2.0
+    write("bridge.db", "sc", 2.0, mode="update")
+    assert value("bridge.db", "sc") == 2.0
     assert session.open_databases == ()
 
 
@@ -320,13 +320,13 @@ def test_missing_function_is_package_error(library, monkeypatch):
 
 def test_numeric_scalar_bits_survive_the_shim(db, session):
     values = np.array([0x7F800101], dtype=np.uint32).view(np.float32)
-    famepy.write_object(db, "array", famepy.series("numeric", "case", 1, values))
-    famepy.write_object(db, "scalar", famepy.RawScalar("numeric", values[0]))
-    assert int(famepy.read_object(db, "array").values.view(np.uint32)[0]) == 0x7F800101
-    raw = famepy.read_object(db, "scalar")
-    assert isinstance(raw.value, np.float32)
-    assert int(np.array([raw.value]).view(np.uint32)[0]) == 0x7F800101
-    assert famepy.missing_type(db, "numeric", raw.value) == 0
+    famepy.do_write(series_object("array", "numeric", "case", 1, values), db)
+    famepy.do_write(scalar_object("scalar", "numeric", values[0]), db)
+    assert int(read(db, "array").data.view(np.uint32)[0]) == 0x7F800101
+    raw = read(db, "scalar")
+    assert isinstance(raw.data, np.float32)
+    assert int(np.array([raw.data]).view(np.uint32)[0]) == 0x7F800101
+    assert famepy.missing_type(db, "numeric", raw.data) == 0
     assert famepy.missing_type(db, "numeric", session.sentinels.numeric_na) == 2
     assert isinstance(session.sentinels.numeric_nc, np.float32)
 
@@ -357,7 +357,7 @@ def test_one_shot_lifecycle_against_the_shim(native, library):
 def test_broken_owner_blocks_a_second_wrapper_on_the_same_library(native, library):
     first = Session(native=native).initialize()
     helper(library, "shim_fail_next", None, [ct.c_int32])(55)
-    with pytest.raises(FameError):
+    with pytest.raises(HLIError):
         first.finalize()
     assert first.state == "broken" and helper(library, "shim_initialized")() == 1
     with pytest.raises(famepy.RuntimeStateError):
@@ -391,21 +391,21 @@ def test_rewritten_text_arguments_never_touch_the_callers_bytes(session, library
     option, value = b" item class ", b" on "
     namelist = b"{ a, b }"
     keyed = {name: "name", option: "option", value: "value", namelist: "list"}
-    database = famepy.open_database(b" rewrite.db ", "create", session=session)
-    famepy.write_object(database, name, famepy.scalar("precision", 1.0))
-    famepy.write_object(database, b" nl ", famepy.scalar("namelist", namelist))
-    database.post()
+    database = famepy.opendb(b" rewrite.db ", "create", session=session)
+    famepy.do_write(scalar_object(name, "precision", 1.0), database)
+    famepy.do_write(scalar_object(b" nl ", "namelist", namelist), database)
+    famepy.postdb(database)
     with database.session.operation("options") as native:
         native.set_option(option, value)
-    assert famepy.read_object(database, "kept").value == 1.0
-    stored = famepy.read_object(database, "nl").value
+    assert read(database, "kept").data == 1.0
+    stored = read(database, "nl").data
     assert stored == b"{ A, B }"  # the shim stored its upper-cased rewrite
     assert famepy.namelist_members(stored) == (b"A", b"B")
     famepy.delete_object(database, name)
-    database.post()
-    database.close()
-    with famepy.open_database("rewrite.db", session=session) as reopened:
-        assert [i.name_text for i in famepy.list_objects(reopened)] == ["NL"]
+    famepy.postdb(database)
+    famepy.closedb(database)
+    with famepy.opendb("rewrite.db", session=session) as reopened:
+        assert [i.name_text for i in famepy.listdb(reopened)] == ["NL"]
     assert name == b"kept" and option == b" item class " and value == b" on "
     assert namelist == b"{ a, b }"
     assert keyed[b"kept"] == "name" and keyed[b"{ a, b }"] == "list"
@@ -413,20 +413,20 @@ def test_rewritten_text_arguments_never_touch_the_callers_bytes(session, library
 
 
 def test_shim_rejects_connection_modes_and_undocumented_option_words(session, native):
-    database = famepy.open_database("modes.db", "create", session=session)
-    database.post()
-    database.close()
+    database = famepy.opendb("modes.db", "create", session=session)
+    famepy.postdb(database)
+    famepy.closedb(database)
     for mode in (6, 7):
-        with pytest.raises(FameError) as error:
+        with pytest.raises(HLIError) as error:
             native.open_database(b"modes.db", mode)
         assert error.value.status == 5
         with pytest.raises(famepy.UnsupportedOperationError):
-            famepy.open_database("modes.db", mode, session=session)
-    with pytest.raises(FameError) as error:
+            famepy.opendb("modes.db", mode, session=session)
+    with pytest.raises(HLIError) as error:
         native.open_database(b"absent.db", 6)
     assert error.value.status == 5
     for word in (b"ITEM FREQUENCY CASE", b"ITEM FREQUENCY QUARTERLY_DECEMBER", b"ITEM INDEX X"):
-        with pytest.raises(FameError) as error:
+        with pytest.raises(HLIError) as error:
             native.set_option(word, b"ON")
         assert error.value.status == 67
     native.set_option(b"ITEM FREQUENCY", b"ON")
@@ -434,16 +434,16 @@ def test_shim_rejects_connection_modes_and_undocumented_option_words(session, na
 
 
 def test_shim_applies_family_and_index_selectors_to_series_only(db):
-    famepy.write_object(db, "m", famepy.series("precision", "monthly", 0, np.zeros(1)))
-    famepy.write_object(db, "q", famepy.series("precision", "quarterly_december", 0, np.zeros(1)))
-    famepy.write_object(db, "c", famepy.series("string", "case", 1, [b"x"]))
-    famepy.write_object(db, "s", famepy.scalar("precision", 1.0))
-    names = lambda **f: sorted(i.name_text for i in famepy.list_objects(db, **f))  # noqa: E731
-    assert names(frequencies="monthly") == ["M"]
-    assert names(frequencies=["monthly", "quarterly_december"]) == ["M", "Q"]
-    assert names(frequencies="case") == ["C"]
-    assert names(frequencies=["case", "monthly"]) == ["C", "M"]
-    assert names(frequencies=["undefined", "monthly"]) == ["M", "S"]
+    famepy.do_write(series_object("m", "precision", "monthly", 0, np.zeros(1)), db)
+    famepy.do_write(series_object("q", "precision", "quarterly_december", 0, np.zeros(1)), db)
+    famepy.do_write(series_object("c", "string", "case", 1, [b"x"]), db)
+    famepy.do_write(scalar_object("s", "precision", 1.0), db)
+    names = lambda **f: sorted(i.name_text for i in famepy.listdb(db, **f))  # noqa: E731
+    assert names(freq="monthly") == ["M"]
+    assert names(freq=["monthly", "quarterly_december"]) == ["M", "Q"]
+    assert names(freq="case") == ["C"]
+    assert names(freq=["case", "monthly"]) == ["C", "M"]
+    assert names(freq=["undefined", "monthly"]) == ["M", "S"]
     assert names() == ["C", "M", "Q", "S"]
     from famepy._wildcard import native_listing_count
 
@@ -476,11 +476,11 @@ def test_shim_models_the_reserved_name_and_case_type_boundaries(db):
     from famepy._constants import FREQUENCY_CASE
     from famepy._errors import HBOBJT, HNRESW
 
-    with pytest.raises(FameError) as info:
-        famepy.write_object(db, "namelist", famepy.scalar("namelist", b"{A}"))
+    with pytest.raises(HLIError) as info:
+        famepy.do_write(scalar_object("namelist", "namelist", b"{A}"), db)
     assert info.value.status == HNRESW == 25
-    with db.operation("new object") as native, pytest.raises(FameError) as info:
+    with db.operation("new object") as native, pytest.raises(HLIError) as info:
         native.new_object(db.key, b"CASE_TYPED", 1, 9, FREQUENCY_CASE, 1, 0)
     assert info.value.status == HBOBJT == 16
-    famepy.write_object(db, "k_namelist", famepy.scalar("namelist", b"{A}"))
-    assert [i.name_text for i in famepy.list_objects(db)] == ["K_NAMELIST"]
+    famepy.do_write(scalar_object("k_namelist", "namelist", b"{A}"), db)
+    assert [i.name_text for i in famepy.listdb(db)] == ["K_NAMELIST"]

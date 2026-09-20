@@ -246,7 +246,7 @@ def write_python_fixtures(ctx: Context, python_path: Path) -> None:
     workspace["jk_nl"] = "{A,B}"
     workspace["jk_num"] = np.float32(1.5)
     workspace["jk_date"] = ts.qq(2021, 3)
-    bridge.write_workspace(python_path, workspace, mode="update")
+    famepy.writefame(python_path, workspace, mode="update")
 
 
 def _int_field(payload: dict[str, Any], key: str) -> int | None:
@@ -391,24 +391,22 @@ def run_julia_differential(ctx: Context, python_path: Path) -> None:
     )
 
     def read_julia_written() -> None:
-        back = bridge.read_tseries(julia_path, "jts")
+        back = famepy.readfame(julia_path, "jts")["jts"]
         r.equal("python_reads_julia_firstdate", int(back.firstdate), int(ts.mm(2021, 1)))
         r.equal(
             "python_reads_julia_values",
             np.array_equal(back.values, np.array([1.0, np.nan, 3.0]), equal_nan=True),
             True,
         )
-        r.equal("python_reads_julia_scalar", bridge.read_scalar(julia_path, "jsc"), 7.5)
-        with famepy.open_database(julia_path, session=ctx.session) as database:
-            raw: Any = famepy.read_object(database, "jts")
+        r.equal("python_reads_julia_scalar", famepy.readfame(julia_path, "jsc")["jsc"], 7.5)
+        with famepy.opendb(julia_path, session=ctx.session) as database:
+            raw: Any = famepy.do_read(famepy.quick_info(database, "jts"), database)
             r.equal(
                 "julia_nan_is_nc",
-                famepy.classify_by_sentinel(
-                    raw.values, "precision", ctx.session.sentinels
-                ).tolist(),
+                famepy.classify_by_sentinel(raw.data, "precision", ctx.session.sentinels).tolist(),
                 [0, 1, 0],
             )
-        written = bridge.read_workspace(julia_path, "jw?", "jkw?", empty="reference")
+        written = famepy.readfame(julia_path, "jw?", "jkw?", empty="reference")
         for label, code, _ctor in frequency_specs():
             series = written.get(f"jw_{label}")
             r.equal(

@@ -8,7 +8,7 @@ from fake_native import S_ALREADY_INITIALIZED, S_NOT_INITIALIZED, SENTINELS, Fak
 import famepy
 from famepy import (
     ExtendedErrorRetrieval,
-    FameError,
+    HLIError,
     InheritedRuntimeError,
     LicensingConfigurationError,
     RuntimeStateError,
@@ -99,7 +99,7 @@ def test_pre_native_failures_do_not_consume_initialization(tmp_path, monkeypatch
 def test_failed_native_initialization_is_terminal(fake):
     fake.fake.fail_next["cfmini"] = 97
     owner = Session(native=fake)
-    with pytest.raises(FameError) as error:
+    with pytest.raises(HLIError) as error:
         owner.initialize()
     assert error.value.status == 97
     assert owner.state == "failed" and owner.is_terminal
@@ -109,7 +109,7 @@ def test_failed_native_initialization_is_terminal(fake):
     with pytest.raises(RuntimeStateError):
         Session(native=fake).initialize()
     with pytest.raises(RuntimeStateError):
-        famepy.initialize()
+        famepy.init_chli()
     assert fake.fake.calls.count("cfmini") == 1
     owner.finalize()  # harmless; no cfmfin is issued for a never-initialized library
     assert "cfmfin" not in fake.fake.calls
@@ -120,7 +120,7 @@ def test_setup_failure_after_cfmini_is_terminal_with_one_cleanup_cfmfin(fake, mo
     monkeypatch.setattr(
         fake.fake, "sentinels", lambda: (_ for _ in ()).throw(FakeStatus(S_NOT_INITIALIZED))
     )
-    with pytest.raises(FameError) as error:
+    with pytest.raises(HLIError) as error:
         owner.initialize()
     assert error.value.status == S_NOT_INITIALIZED
     assert owner.state == "finalized" and owner.finalize_status == 0
@@ -140,7 +140,7 @@ def test_setup_cleanup_failure_is_broken_and_keeps_the_original_error(fake, monk
         fake.fake, "sentinels", lambda: (_ for _ in ()).throw(FakeStatus(S_NOT_INITIALIZED))
     )
     fake.fake.fail_next["cfmfin"] = 55
-    with pytest.raises(FameError) as error:
+    with pytest.raises(HLIError) as error:
         owner.initialize()
     assert error.value.status == S_NOT_INITIALIZED  # the setup failure, not the cleanup
     assert "cleanup cfmfin failed" in getattr(error.value, "__notes__", [])
@@ -151,7 +151,7 @@ def test_setup_cleanup_failure_is_broken_and_keeps_the_original_error(fake, monk
     with pytest.raises(RuntimeStateError, match="spawned process"):
         Session(native=make_fake()).initialize()
     owner.finalize()
-    famepy.finalize()
+    famepy.close_chli()
     assert fake.fake.calls.count("cfmfin") == 1
     assert owner.state == "broken"
 
@@ -172,33 +172,33 @@ def test_single_owner_per_process_even_after_finalization(fake):
 def test_double_native_initialization_is_a_status(fake):
     fake.fake.initialized = True
     owner = Session(native=fake)
-    with pytest.raises(FameError) as error:
+    with pytest.raises(HLIError) as error:
         owner.initialize()
     assert error.value.status == S_ALREADY_INITIALIZED
 
 
 def test_finalize_closes_databases_and_invalidates_handles(session, tmp_path):
-    database = famepy.open_database(tmp_path / "a.db", "create", session=session)
-    work = famepy.work_database(session=session)
+    database = famepy.opendb(tmp_path / "a.db", "create", session=session)
+    work = famepy.workdb(session=session)
     assert len(session.open_databases) == 2
     session.finalize()
     assert not database.is_open and not work.is_open
     with pytest.raises(StaleHandleError, match="finalized"):
-        database.post()
+        famepy.postdb(database)
     with pytest.raises(StaleHandleError):
         famepy.quick_info(database, "x")
     with pytest.raises(StaleHandleError):
         with database:
             pass
-    database.close()
+    famepy.closedb(database)
     assert session.last_cleanup_statuses == ()
     with pytest.raises(RuntimeStateError):
-        famepy.work_database(session=session)
+        famepy.workdb(session=session)
     assert session._native.fake.calls.count("cfmcldb") == 2
 
 
 def test_finalize_records_close_failures(session, tmp_path):
-    database = famepy.open_database(tmp_path / "a.db", "create", session=session)
+    database = famepy.opendb(tmp_path / "a.db", "create", session=session)
     session._native.fake.fail_next["cfmcldb"] = 903
     session.finalize()
     assert session.last_cleanup_statuses == (903,)
@@ -208,7 +208,7 @@ def test_finalize_records_close_failures(session, tmp_path):
 def test_broken_finalization_is_terminal_and_never_retried(fake):
     owner = Session(native=fake).initialize()
     fake.fake.fail_next["cfmfin"] = 55
-    with pytest.raises(FameError) as error:
+    with pytest.raises(HLIError) as error:
         owner.finalize()
     assert error.value.status == 55
     assert owner.state == "broken" and owner.finalize_status == 55
@@ -219,14 +219,14 @@ def test_broken_finalization_is_terminal_and_never_retried(fake):
     with pytest.raises(RuntimeStateError, match="spawned process"):
         other.initialize()
     with pytest.raises(RuntimeStateError):
-        famepy.initialize()
+        famepy.init_chli()
     with pytest.raises(RuntimeStateError, match="broken"):
         famepy.current_session()
     with pytest.raises(RuntimeStateError, match="broken"):
         owner.version()
     # Repeated Python-level cleanup is harmless and issues no second cfmfin.
     owner.finalize()
-    famepy.finalize()
+    famepy.close_chli()
     assert fake.fake.calls.count("cfmfin") == 1 and fake.fake.init_count == 1
     assert owner.state == "broken"
 
@@ -244,7 +244,7 @@ def test_inherited_process_is_rejected_even_for_new_wrappers(fake, monkeypatch):
 def test_inherited_broken_owner_is_still_rejected(fake):
     owner = Session(native=fake).initialize()
     fake.fake.fail_next["cfmfin"] = 55
-    with pytest.raises(FameError):
+    with pytest.raises(HLIError):
         owner.finalize()
     _runtime._after_fork()
     assert _runtime._INHERITED
@@ -313,27 +313,27 @@ def test_module_level_api(fake, monkeypatch, tmp_path):
     monkeypatch.setenv("FAME", str(tmp_path))
     with pytest.raises(RuntimeStateError):
         famepy.current_session()
-    owner = famepy.initialize(path)
+    owner = famepy.init_chli(path)
     assert famepy.current_session() is owner
-    assert famepy.initialize() is owner
+    assert famepy.init_chli() is owner
     with pytest.raises(RuntimeStateError):
-        famepy.initialize(tmp_path / "other.dll")
+        famepy.init_chli(tmp_path / "other.dll")
     assert famepy.version() == 11.8
     with pytest.raises(UnsupportedOperationError):
         famepy.reset()
     assert owner.is_initialized and owner.generation == 1
-    famepy.finalize()
+    famepy.close_chli()
     assert owner.state == "finalized"
-    famepy.finalize()
+    famepy.close_chli()
     fake.fake.calls.clear()
     with pytest.raises(RuntimeStateError, match="spawned process"):
-        famepy.initialize()
+        famepy.init_chli()
     with pytest.raises(RuntimeStateError, match="spawned process"):
-        famepy.initialize(path)
+        famepy.init_chli(path)
     other = tmp_path / "other.dll"
     other.touch()
     with pytest.raises(RuntimeStateError, match="spawned process"):
-        famepy.initialize(other)
+        famepy.init_chli(other)
     with pytest.raises(RuntimeStateError, match="spawned process"):
         famepy.default_session(other)
     with pytest.raises(RuntimeStateError, match="spawned process"):
@@ -353,13 +353,13 @@ def test_library_is_fixed_for_the_process_once_loaded(fake, monkeypatch, tmp_pat
     monkeypatch.setattr(_runtime, "CtypesNative", lambda library: fake)
     monkeypatch.setattr(ct, "CDLL", lambda p: object())
     monkeypatch.setenv("FAME", str(tmp_path))
-    owner = famepy.initialize()
+    owner = famepy.init_chli()
     assert owner is replaced
     with pytest.raises(RuntimeStateError, match="fixed"):
         famepy.default_session(path)
     with pytest.raises(RuntimeStateError, match="fixed"):
-        famepy.initialize(path)
-    assert famepy.initialize() is owner
+        famepy.init_chli(path)
+    assert famepy.init_chli() is owner
     owner.finalize()
     with pytest.raises(RuntimeStateError, match="spawned process"):
         famepy.default_session(path)
@@ -373,8 +373,8 @@ def test_extended_error_is_captured_at_the_failure(session, tmp_path):
     with pytest.raises(RuntimeStateError, match="captured"):
         session.extended_error_text()
     session._native.fake.error_text = b"synthetic message"
-    with pytest.raises(FameError) as error:
-        famepy.open_database(tmp_path / "missing.db", session=session)
+    with pytest.raises(HLIError) as error:
+        famepy.opendb(tmp_path / "missing.db", session=session)
     assert error.value.extended_text == b"synthetic message"
     assert "synthetic" not in str(error.value)
     assert session.extended_error_text() == b"synthetic message"
@@ -392,21 +392,21 @@ def test_declared_retrieval_uses_the_length_and_fetch_calls(session, tmp_path):
     assert isinstance(retrieval, ExtendedErrorRetrieval)
     fake.error_text = b"synthetic text 7"
     fake.calls.clear()
-    with pytest.raises(FameError) as error:
-        famepy.open_database(tmp_path / "missing.db", session=session)
+    with pytest.raises(HLIError) as error:
+        famepy.opendb(tmp_path / "missing.db", session=session)
     assert error.value.extended_text == b"synthetic text 7"
     assert "synthetic" not in str(error.value) and "synthetic" not in repr(error.value)
     assert fake.calls == ["cfmopdb", "cfmlerr", "cfmferr"]
     assert session.extended_error_capture_failure is None
     # The buffer is sized from the declared length and cut at the terminator.
     fake.error_text = b"a" * 10
-    with pytest.raises(FameError) as error:
-        famepy.open_database(tmp_path / "missing.db", session=session)
+    with pytest.raises(HLIError) as error:
+        famepy.opendb(tmp_path / "missing.db", session=session)
     assert error.value.extended_text == b"a" * 10
     # A length beyond the bound is refused and recorded, never allocated.
     fake.error_text = b"x" * (2**16 + 1)
-    with pytest.raises(FameError) as error:
-        famepy.open_database(tmp_path / "missing.db", session=session)
+    with pytest.raises(HLIError) as error:
+        famepy.opendb(tmp_path / "missing.db", session=session)
     assert error.value.extended_text is None
     assert session.extended_error_capture_failure == "DataValidationError"
 
@@ -416,8 +416,8 @@ def test_extended_error_capture_failure_never_masks_the_status(session, tmp_path
         session.extended_error_retrieval = ExtendedErrorRetrieval(
             query_length=lambda native, length=length: length, fetch=lambda native, buffer: None
         )
-        with pytest.raises(FameError) as error:
-            famepy.open_database(tmp_path / "missing.db", session=session)
+        with pytest.raises(HLIError) as error:
+            famepy.opendb(tmp_path / "missing.db", session=session)
         assert error.value.extended_text is None
         assert session.extended_error_capture_failure == "DataValidationError"
         with pytest.raises(RuntimeStateError):
@@ -425,8 +425,8 @@ def test_extended_error_capture_failure_never_masks_the_status(session, tmp_path
     session.extended_error_retrieval = ExtendedErrorRetrieval(
         query_length=lambda native: 0, fetch=lambda native, buffer: None
     )
-    with pytest.raises(FameError) as error:
-        famepy.open_database(tmp_path / "missing.db", session=session)
+    with pytest.raises(HLIError) as error:
+        famepy.opendb(tmp_path / "missing.db", session=session)
     assert error.value.extended_text == b""
     assert session.extended_error_text() == b""
 

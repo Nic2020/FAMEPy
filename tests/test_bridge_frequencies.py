@@ -276,7 +276,7 @@ def test_index_conversion_argument_checks(db):
 
 
 def test_library_calendar_errors_surface(session):
-    with pytest.raises(famepy.FameError) as info:
+    with pytest.raises(famepy.HLIError) as info:
         bridge.mit_to_index(daily("0099-06-01"), session=session)
     assert info.value.status == 914
     # A library answer outside the year (the fake shifted) is refused, never normalized.

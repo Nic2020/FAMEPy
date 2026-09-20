@@ -9,7 +9,7 @@ touched. With an installed FAME::
 
     python examples/retire_synthetic.py --scratch <new-dir>
 
-The runtime is initialized once per process (``famepy.initialize``); the
+The runtime is initialized once per process (``famepy.init_chli``); the
 ``FAME`` environment variable must point at the installation. A test
 backend can be injected for a dry run without FAME (see the tests).
 """
@@ -58,12 +58,12 @@ def main(argv: list[str] | None = None) -> int:
         native = getattr(importlib.import_module(module_name), factory)()
         session = famepy.Session(native=native)
     else:
-        session = famepy.initialize()
+        session = famepy.init_chli()
     session.initialize()
     try:
         source = scratch / "synthetic.db"
         ws = synthetic_workspace()
-        bridge.write_workspace(source, ws, mode="create")
+        famepy.writefame(source, ws, mode="create")
         plan = migration.plan_migration(source, session=session)
         print(plan.summary())
         archive = scratch / "archive.daec"

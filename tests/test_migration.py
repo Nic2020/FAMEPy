@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import tsecon as ts
+from canonical import scalar_object, series_object
 from tsecon import MIT, TSeries, Unit
 from tsecon.dataecon import open_dataecon
 
@@ -52,36 +53,36 @@ def source(session, tmp_path):
     ws = _workspace()
     s = session.sentinels
     first = bridge.mit_to_index(ts.mm(2020, 1), session=session)
-    with famepy.open_database(path, "create", session=session) as db:
-        bridge.write_workspace(db, ws)
-        famepy.write_object(
-            db, "pna", famepy.scalar("precision", sentinel_value("precision", MISSING_NA, s))
+    with famepy.opendb(path, "create", session=session) as db:
+        famepy.writefame(db, ws)
+        famepy.do_write(
+            scalar_object("pna", "precision", sentinel_value("precision", MISSING_NA, s)), db
         )
-        famepy.write_object(db, "dsc", famepy.scalar("date", s.index_nc, date_frequency="monthly"))
-        famepy.write_object(
-            db,
-            "psnd",
-            famepy.series(
+        famepy.do_write(scalar_object("dsc", "date", s.index_nc, date_frequency="monthly"), db)
+        famepy.do_write(
+            series_object(
+                "psnd",
                 "precision",
                 "monthly",
                 first,
                 np.array([1.0, sentinel_value("precision", MISSING_ND, s), 3.0]),
             ),
-        )
-        famepy.write_object(
             db,
-            "bsna",
-            famepy.series(
+        )
+        famepy.do_write(
+            series_object(
+                "bsna",
                 "boolean",
                 "monthly",
                 first,
                 np.array([1, sentinel_value("boolean", MISSING_NA, s), 0], dtype=np.int32),
             ),
+            db,
         )
-        famepy.write_object(
-            db, "bsc", famepy.scalar("boolean", sentinel_value("boolean", MISSING_NC, s))
+        famepy.do_write(
+            scalar_object("bsc", "boolean", sentinel_value("boolean", MISSING_NC, s)), db
         )
-        db.post()
+        famepy.postdb(db)
     return path
 
 
@@ -276,10 +277,10 @@ def test_existing_destination_is_never_opened_or_changed(session, source, tmp_pa
 
 def test_incomplete_archive_is_never_completed_by_a_later_run(session, tmp_path):
     src = tmp_path / "t.db"
-    with famepy.open_database(src, "create", session=session) as db:
-        famepy.write_object(db, "bad", famepy.scalar("string", b"caf\xe9"))
-        famepy.write_object(db, "good", famepy.scalar("string", b"cafe"))
-        db.post()
+    with famepy.opendb(src, "create", session=session) as db:
+        famepy.do_write(scalar_object("bad", "string", b"caf\xe9"), db)
+        famepy.do_write(scalar_object("good", "string", b"cafe"), db)
+        famepy.postdb(db)
     archive = tmp_path / "t.daec"
     first = migration.migrate(src, archive, patterns=("bad",), session=session)
     assert first.status == "incomplete"
@@ -341,9 +342,9 @@ def test_stale_or_mismatched_plans_are_refused(session, source, tmp_path):
             plan=plan,
             session=session,
         )
-    with famepy.open_database(source, "update", session=session) as db:
-        famepy.write_object(db, "extra", famepy.scalar("string", b"added later"))
-        db.post()
+    with famepy.opendb(source, "update", session=session) as db:
+        famepy.do_write(scalar_object("extra", "string", b"added later"), db)
+        famepy.postdb(db)
     with pytest.raises(migration.MigrationRefused, match="no longer matches"):
         migration.migrate(source, tmp_path / "x.daec", plan=plan, session=session)
     assert not (tmp_path / "x.daec").exists() and _partials(tmp_path) == []
@@ -353,11 +354,11 @@ def test_stale_or_mismatched_plans_are_refused(session, source, tmp_path):
 
 def test_refused_plans_create_nothing(session, tmp_path):
     unsupported = tmp_path / "u.db"
-    with famepy.open_database(unsupported, "create", session=session) as db:
-        famepy.write_object(db, "tenday", famepy.series("precision", "tenday", 1, np.array([1.0])))
-        famepy.write_object(db, "ok", famepy.scalar("precision", 2.0))
-        famepy.write_object(db, "ok2", famepy.scalar("precision", 3.0))
-        db.post()
+    with famepy.opendb(unsupported, "create", session=session) as db:
+        famepy.do_write(series_object("tenday", "precision", "tenday", 1, np.array([1.0])), db)
+        famepy.do_write(scalar_object("ok", "precision", 2.0), db)
+        famepy.do_write(scalar_object("ok2", "precision", 3.0), db)
+        famepy.postdb(db)
     plan = migration.plan_migration(unsupported, session=session)
     assert [(e.name, e.action, e.reason) for e in plan.entries] == [
         ("OK", "store", None),
@@ -417,10 +418,10 @@ def test_options_are_validated():
 def test_conversion_failure_is_contained_and_marked(session, tmp_path):
     """A non-ASCII string cannot cross the text boundary; the archive says so."""
     source = tmp_path / "t.db"
-    with famepy.open_database(source, "create", session=session) as db:
-        famepy.write_object(db, "bad", famepy.scalar("string", b"caf\xe9"))
-        famepy.write_object(db, "good", famepy.scalar("string", b"cafe"))
-        db.post()
+    with famepy.opendb(source, "create", session=session) as db:
+        famepy.do_write(scalar_object("bad", "string", b"caf\xe9"), db)
+        famepy.do_write(scalar_object("good", "string", b"cafe"), db)
+        famepy.postdb(db)
     report = migration.migrate(source, tmp_path / "t.daec", session=session)
     outcomes = {e.name: (e.action, e.error_type) for e in report.entries}
     assert outcomes == {"BAD": ("failed", "TextEncodingError"), "GOOD": ("stored", None)}

@@ -151,26 +151,42 @@ def raw_fixtures(sentinels: Any, first: int) -> list[tuple[str, Any, Any]]:
     return [
         (
             "m_precision_na",
-            famepy.scalar("precision", na),
+            famepy.FameObject("m_precision_na", "scalar", "precision", "undefined", data=na),
             migration.expected_object("m_precision_na", None, category=2, kind="precision"),
         ),
         (
             "m_date_nc",
-            famepy.scalar("date", sentinels.index_nc, date_frequency="monthly"),
+            famepy.FameObject(
+                "m_date_nc", "scalar", "monthly", "undefined", data=sentinels.index_nc
+            ),
             migration.expected_object(
                 "m_date_nc", None, category=1, kind="date", value_frequency=ts.Monthly()
             ),
         ),
         (
             "m_pseries_nd",
-            famepy.series("precision", "monthly", first, np.array([1.0, nd, 3.0])),
+            famepy.FameObject(
+                "m_pseries_nd",
+                "series",
+                "precision",
+                "monthly",
+                first,
+                data=np.array([1.0, nd, 3.0]),
+            ),
             migration.expected_object(
                 "m_pseries_nd", ts.TSeries(monthly, [1.0, np.nan, 3.0]), categories=[0, 3, 0]
             ),
         ),
         (
             "m_bseries_na",
-            famepy.series("boolean", "monthly", first, np.array([1, bna, 0], dtype=np.int32)),
+            famepy.FameObject(
+                "m_bseries_na",
+                "series",
+                "boolean",
+                "monthly",
+                first,
+                data=np.array([1, bna, 0], dtype=np.int32),
+            ),
             migration.expected_object(
                 "m_bseries_na", ts.TSeries(monthly, [True, False, False]), categories=[0, 2, 0]
             ),
@@ -237,11 +253,11 @@ def group_migration(ctx: Context) -> None:
         case_of="write:{}".format,
         mode="create",
     )
-    with famepy.open_database(source, "update", session=session) as database:
+    with famepy.opendb(source, "update", session=session) as database:
         for name, raw, _expected in raw_fixtures(sentinels, first):
-            if r.ok(f"write:{name}", partial(famepy.write_object, database, name, raw)):
+            if r.ok(f"write:{name}", partial(famepy.do_write, raw, database)):
                 written.add(name)
-        database.post()
+        famepy.postdb(database)
     expected = expected_objects(sentinels, first)
     present = {w.upper() for w in written}
     missing_objects = [name for name in ALL_NAMES if name.upper() not in present]
@@ -326,12 +342,15 @@ def negative_cases(ctx: Context, source: Any, destination: Any, expected: dict[s
     r.equal("existing_destination_unchanged", existing.read_bytes() == before, True)
     # A refused plan creates no destination: an unsupported frequency in the source.
     unsupported = ctx.path("unsupported.db")
-    with famepy.open_database(unsupported, "create", session=session) as database:
-        famepy.write_object(
-            database, "u_tenday", famepy.series("precision", "tenday", 1, np.array([1.0]))
+    with famepy.opendb(unsupported, "create", session=session) as database:
+        famepy.do_write(
+            famepy.FameObject("u_tenday", "series", "precision", "tenday", 1, data=np.array([1.0])),
+            database,
         )
-        famepy.write_object(database, "u_ok", famepy.scalar("precision", 2.0))
-        database.post()
+        famepy.do_write(
+            famepy.FameObject("u_ok", "scalar", "precision", "undefined", data=2.0), database
+        )
+        famepy.postdb(database)
     absent = ctx.path("absent.daec")
     r.expect_error(
         "refused_plan_creates_nothing",
@@ -360,13 +379,17 @@ def negative_cases(ctx: Context, source: Any, destination: Any, expected: dict[s
     r.equal("invalid_firstdate_no_file", absent.exists(), False)
     # A plan built before the source changed is refused, not trusted.
     stale_source = ctx.path("stale.db")
-    with famepy.open_database(stale_source, "create", session=session) as database:
-        famepy.write_object(database, "s_first", famepy.scalar("precision", 1.0))
-        database.post()
+    with famepy.opendb(stale_source, "create", session=session) as database:
+        famepy.do_write(
+            famepy.FameObject("s_first", "scalar", "precision", "undefined", data=1.0), database
+        )
+        famepy.postdb(database)
     stale_plan = migration.plan_migration(stale_source, session=session)
-    with famepy.open_database(stale_source, "update", session=session) as database:
-        famepy.write_object(database, "s_second", famepy.scalar("precision", 2.0))
-        database.post()
+    with famepy.opendb(stale_source, "update", session=session) as database:
+        famepy.do_write(
+            famepy.FameObject("s_second", "scalar", "precision", "undefined", data=2.0), database
+        )
+        famepy.postdb(database)
     r.expect_error(
         "stale_plan_refused",
         lambda: migration.migrate(stale_source, absent, plan=stale_plan, session=session),
@@ -410,10 +433,14 @@ def negative_cases(ctx: Context, source: Any, destination: Any, expected: dict[s
     # boundary) is reported and leaves the archive marked incomplete; a later
     # run can neither complete nor change that archive.
     text_source = ctx.path("text.db")
-    with famepy.open_database(text_source, "create", session=session) as database:
-        famepy.write_object(database, "t_bad", famepy.scalar("string", b"caf\xe9"))
-        famepy.write_object(database, "t_good", famepy.scalar("string", b"cafe"))
-        database.post()
+    with famepy.opendb(text_source, "create", session=session) as database:
+        famepy.do_write(
+            famepy.FameObject("t_bad", "scalar", "string", "undefined", data=b"caf\xe9"), database
+        )
+        famepy.do_write(
+            famepy.FameObject("t_good", "scalar", "string", "undefined", data=b"cafe"), database
+        )
+        famepy.postdb(database)
     partial_path = ctx.path("partial.daec")
     partial = r.check(
         "partial_migrate",

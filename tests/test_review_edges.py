@@ -9,49 +9,58 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from canonical import read, scalar_object, value, write
 from tsecon import MIT, Monthly, TSeries, mm
 
 import famepy
-from famepy import _runtime, bridge, validation
+from famepy import _runtime, validation
 from famepy._constants import ObjectType, frequency_code
+from famepy._data import RawScalar, RawSeries
 from famepy._discovery import discover
 from famepy.validation._process import _kill_tree, run_child
 
 
 @pytest.mark.parametrize("frequency", [0, 1, True, 2**40, ObjectType.NUMERIC])
 def test_date_rejection_before_write(db, frequency):
-    famepy.write_object(db, "keep", famepy.scalar("precision", 7.0))
+    famepy.do_write(scalar_object("keep", "precision", 7.0), db)
     fake = db.session._native.fake
     fake.calls.clear()
     with pytest.raises(famepy.DataValidationError):
-        famepy.write_object(db, "keep", famepy.RawScalar("date", 1, frequency), replace=True)
-    assert fake.calls == []
-    assert famepy.read_object(db, "keep").value == 7.0
+        RawScalar("date", 1, frequency)
     with pytest.raises(famepy.DataValidationError):
-        famepy.RawSeries("date", 129, 1, np.ones(1, dtype=np.int64), frequency)
+        RawSeries("date", 129, 1, np.ones(1, dtype=np.int64), frequency)
+    if frequency in (0, 2**40):
+        with pytest.raises((famepy.DataValidationError, TypeError)):
+            famepy.do_write(
+                famepy.FameObject("keep", "scalar", frequency, "undefined", data=1),
+                db,
+                replace=True,
+            )
+    assert fake.calls == []
+    assert read(db, "keep").data == 7.0
 
 
 def test_enum_and_float_overflow():
     with pytest.raises(ValueError):
         frequency_code(ObjectType.NUMERIC)
     with pytest.raises(famepy.DataValidationError):
-        famepy.RawScalar("numeric", 1e100)
+        RawScalar("numeric", 1e100)
 
 
 @pytest.mark.parametrize("bad_name", ["", "x" * 243])
 def test_name_rejection_before_io(session, tmp_path, bad_name):
     path = tmp_path / "keep.db"
-    with famepy.open_database(path, "create", session=session) as database:
-        famepy.write_object(database, "keep", famepy.scalar("precision", 7.0))
-        database.post()
+    with famepy.opendb(path, "create", session=session) as database:
+        famepy.do_write(scalar_object("keep", "precision", 7.0), database)
+        famepy.postdb(database)
         session._native.fake.calls.clear()
         with pytest.raises(ValueError):
-            famepy.write_object(database, bad_name, famepy.scalar("precision", 1.0), replace=True)
+            famepy.do_write(scalar_object(bad_name, "precision", 1.0), database, replace=True)
         assert session._native.fake.calls == []
     before = path.read_bytes()
     session._native.fake.calls.clear()
     with pytest.raises(ValueError):
-        bridge.write_scalar(path, bad_name, 1.0, mode="overwrite")
+        write(path, bad_name, 1.0, mode="overwrite")
     assert session._native.fake.calls == []
     assert path.read_bytes() == before
 
@@ -65,15 +74,15 @@ def test_series_checks_before_open(session, tmp_path, kind):
     )
     session._native.fake.calls.clear()
     with pytest.raises(famepy.DataValidationError):
-        bridge.write_tseries(tmp_path / "not_created.db", "x", ts, mode="overwrite")
+        write(tmp_path / "not_created.db", "x", ts, mode="overwrite")
     assert session._native.fake.calls == []
     assert not (tmp_path / "not_created.db").exists()
 
 
 def test_signed_minimum_exact(db):
     ts = TSeries(mm(2020, 1), np.array([-(2**63)], dtype=np.int64))
-    bridge.write_tseries(db, "exact", ts)
-    assert bridge.read_tseries(db, "exact").values[0] == float(-(2**63))
+    write(db, "exact", ts)
+    assert value(db, "exact").values[0] == float(-(2**63))
 
 
 def test_quote_boundaries(tmp_path):
@@ -181,18 +190,18 @@ def test_signed_minimum_in_report():
 
 
 def test_cursor_cleanup_error(db):
-    famepy.write_object(db, "x", famepy.scalar("precision", 1.0))
+    famepy.do_write(scalar_object("x", "precision", 1.0), db)
     fake = db.session._native.fake
     fake.fail_next["fame_quick_info"] = 513
     fake.fail_next["fame_free_wildcard"] = 999
-    with pytest.raises(famepy.FameError) as failure:
-        famepy.list_objects(db)
+    with pytest.raises(famepy.HLIError) as failure:
+        famepy.listdb(db)
     assert failure.value.status == 513
     assert fake.options[b"ITEM CLASS"] == b"ON"
 
 
 def test_listing_error_capture(db, monkeypatch):
-    famepy.write_object(db, "x", famepy.scalar("precision", 1.0))
+    famepy.do_write(scalar_object("x", "precision", 1.0), db)
     fake = db.session._native.fake
     fake.error_text = b"original error"
     fake.fail_next["fame_quick_info"] = 513
@@ -207,6 +216,6 @@ def test_listing_error_capture(db, monkeypatch):
         lambda native: len(native.fake.error_text),
         lambda native, buffer: ct.memmove(buffer, native.fake.error_text, len(buffer) - 1),
     )
-    with pytest.raises(famepy.FameError) as failure:
-        famepy.list_objects(db)
+    with pytest.raises(famepy.HLIError) as failure:
+        famepy.listdb(db)
     assert failure.value.extended_text == b"original error"

@@ -5,7 +5,11 @@ Python bindings for the FAME CHLI library with integration for
 The behavioral reference is
 [FAME.jl](https://github.com/bankofcanada/FAME.jl).
 
-**Status: first release candidate (0.1.0rc1). The operational core,
+**Status: release candidate. The public API is spelled as FAME.jl spells
+it (`opendb`, `readfame`, `writefame`, `refame`, `do_read`, ...); the
+second candidate (0.1.0rc2, unreleased) renames the first candidate's
+Python-descriptive names to those spellings, see the
+[changelog](CHANGELOG.md). At revision 889d219 the operational core,
 the full TimeSeriesEconPy bridge (runtime lifecycle, local databases, raw
 object I/O, listing, commands, every reference frequency anchor, every
 value kind, workspace reads and writes, the string value text policies),
@@ -20,14 +24,16 @@ the [parity ledger](docs/parity.md) and the [changelog](CHANGELOG.md).
 These are statements about the inspected installations, not blanket
 version coverage.**
 
-Implemented: runtime lifecycle, databases (the five local access modes, work
-database, explicit posting), raw scalar and series I/O for precision,
-numeric, Boolean, date, string and namelist objects with preserved missing
-categories, wildcard listing with filters, command execution with recursive
-INPUT expansion, and the TimeSeriesEconPy bridge: values of every reference
-kind, all reference frequency anchors, workspace/mapping/multivariate
-writes and workspace reads with name transformation and per-object
-reporting, with string values as ASCII, raw bytes or strict UTF-8.
+Implemented: runtime lifecycle (`init_chli`, `close_chli`), databases
+(`opendb` with the five local access modes, `workdb`, `postdb`, `closedb`),
+named objects (`FameObject`, `quick_info`, `listdb`, `do_read`, `do_write`)
+for precision, numeric, Boolean, date, string and namelist scalars and
+series with preserved missing categories, command execution (`fame`) with
+recursive INPUT expansion, and the TimeSeriesEconPy bridge (`refame`,
+`unfame`, `readfame`, `writefame`): values of every reference kind, all
+reference frequency anchors, workspace/mapping/multivariate writes and
+workspace reads with name transformation and per-object reporting, with
+string values as ASCII, raw bytes or strict UTF-8.
 Also: opt-in extended error text, a
 [FAME-to-DataEcon migration workflow](docs/migration.md) and a
 [benchmark harness](docs/benchmarks.md).
@@ -57,14 +63,20 @@ native libraries.
 
 ```python
 import famepy
-from famepy import bridge
-from tsecon import TSeries, mm
+from tsecon import TSeries, Workspace, mm
 
-famepy.initialize()  # once per process
-bridge.write_tseries("synthetic.db", "ts", TSeries(mm(2020, 1), [1.0, 2.0]), mode="create")
-print(bridge.read_tseries("synthetic.db", "ts"))
-famepy.finalize()  # terminal; use a new process for another runtime
+famepy.init_chli()  # once per process
+famepy.writefame("synthetic.db", Workspace(ts=TSeries(mm(2020, 1), [1.0, 2.0])), mode="create")
+print(famepy.readfame("synthetic.db"))
+with famepy.opendb("synthetic.db") as db:
+    obj = famepy.do_read(famepy.quick_info(db, "ts"), db)  # the named-object form
+    print(famepy.unfame(obj))
+famepy.close_chli()  # terminal; use a new process for another runtime
 ```
+
+The names are FAME.jl's; Python only drops the `!` of `closedb!` and
+`do_read!`, spells the `class` filter keyword `class_`, and replaces
+do-block forms with context managers. See [usage](docs/usage.md).
 
 See [installation](docs/installation.md) (including offline wheelhouses),
 [usage](docs/usage.md), [contracts](docs/contracts.md),

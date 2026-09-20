@@ -34,8 +34,8 @@ def session(fake):
 
 @pytest.fixture
 def db(session, tmp_path):
-    from famepy import open_database
+    from famepy import closedb, opendb
 
-    database = open_database(tmp_path / "synthetic.db", "create", session=session)
+    database = opendb(tmp_path / "synthetic.db", "create", session=session)
     yield database
-    database.close()
+    closedb(database)

@@ -35,7 +35,7 @@ _MESSAGES = {
 }
 
 
-class FameError(RuntimeError):
+class HLIError(RuntimeError):
     """A nonzero CHLI status. Native message text is deliberately not retrieved."""
 
     def __init__(self, status: int, *, operation: str | None = None) -> None:
@@ -123,7 +123,7 @@ class IncludeError(ValueError):
 COMMAND_STAGES = ("redirect", "command", "restore")
 
 
-class CommandError(FameError):
+class CommandError(HLIError):
     """A FAME command failed. Any captured output is kept on ``output`` only.
 
     ``stage`` names which of the three native calls returned the status:
@@ -153,11 +153,11 @@ class CommandError(FameError):
 
 
 def check_status(status: int, *, operation: str | None = None) -> None:
-    """Raise FameError for nonzero signed 32-bit status; preserve unknown codes."""
+    """Raise HLIError for nonzero signed 32-bit status; preserve unknown codes."""
     if isinstance(status, bool):
         raise TypeError("A status must be an integer, not a Boolean.")
     value = operator.index(status)
     if not -(2**31) <= value < 2**31:
         raise OverflowError("Status does not fit a signed 32-bit integer.")
     if value:
-        raise FameError(value, operation=operation)
+        raise HLIError(value, operation=operation)

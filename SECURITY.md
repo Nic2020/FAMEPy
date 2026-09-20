@@ -2,7 +2,7 @@
 
 Report security issues privately to `statespaceecon@gmail.com`. Please provide
 a synthetic reproduction and omit credentials, private databases and raw logs.
-This project is in its first release-candidate cycle; no production support
+This project is in its release-candidate cycle; no production support
 or response-time guarantee is currently offered.
 
 Importing FAMEPy does not load FAME. Library discovery uses explicit absolute

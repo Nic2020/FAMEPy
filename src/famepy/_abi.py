@@ -16,11 +16,11 @@ S = ct.c_char_p
 C = ct.POINTER(ct.c_char)
 
 
-class FameRange(ct.Structure):
+class RangeStruct(ct.Structure):
     _fields_ = [("frequency", INT32), ("start", J), ("end", J)]
 
 
-R = ct.POINTER(FameRange)
+R = ct.POINTER(RangeStruct)
 
 
 @dataclass(frozen=True)
@@ -133,9 +133,9 @@ def layout() -> dict[str, int]:
     return {
         "int_bytes": ct.sizeof(INT32),
         "index_bytes": ct.sizeof(J),
-        "range_bytes": ct.sizeof(FameRange),
-        "range_alignment": ct.alignment(FameRange),
-        "frequency_offset": FameRange.frequency.offset,
-        "start_offset": FameRange.start.offset,
-        "end_offset": FameRange.end.offset,
+        "range_bytes": ct.sizeof(RangeStruct),
+        "range_alignment": ct.alignment(RangeStruct),
+        "frequency_offset": RangeStruct.frequency.offset,
+        "start_offset": RangeStruct.start.offset,
+        "end_offset": RangeStruct.end.offset,
     }

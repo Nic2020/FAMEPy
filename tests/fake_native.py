@@ -49,7 +49,7 @@ from famepy._constants import (
     FREQUENCY_MONTHLY,
     FREQUENCY_NAMES,
 )
-from famepy._native import RangeSpec, Sentinels, WildcardEntry
+from famepy._native import FameRange, Sentinels, WildcardEntry
 
 HSUCC, HFIN, HBMODE, HNOOBJ, HBOBJT, HTRUNC, HNRESW, HBOPT, HFAMER = (
     0,
@@ -429,7 +429,7 @@ class FakeNative:
     # -- data -----------------------------------------------------------
 
     def _read(
-        self, key: int, name: bytes, kind: str, range_: RangeSpec | None, count: int
+        self, key: int, name: bytes, kind: str, range_: FameRange | None, count: int
     ) -> list[Any]:
         obj = self._object(key, name)
         if obj.kind() != kind:
@@ -455,7 +455,7 @@ class FakeNative:
         return list(obj.values[offset : offset + count])
 
     def _write(
-        self, key: int, name: bytes, kind: str, range_: RangeSpec | None, values: list[Any]
+        self, key: int, name: bytes, kind: str, range_: FameRange | None, values: list[Any]
     ) -> None:
         handle = self._writable(key)
         obj = self._object(key, name)
@@ -475,7 +475,7 @@ class FakeNative:
             values, first = self._trimmed(kind, list(values), range_.first)
             if not values:
                 return
-            range_ = RangeSpec(range_.frequency, first, first + len(values) - 1)
+            range_ = FameRange(range_.frequency, first, first + len(values) - 1)
         if obj.values is None:
             obj.values = list(values)
             obj.first, obj.last = range_.first, range_.last
@@ -519,7 +519,7 @@ class FakeNative:
         kind: str,
         key: int,
         name: bytes,
-        range_: RangeSpec | None,
+        range_: FameRange | None,
         out: np.ndarray,
     ) -> None:
         self._enter(function)
@@ -527,17 +527,17 @@ class FakeNative:
         out[:] = np.array(values, dtype=out.dtype)
 
     def get_precisions(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None:
         self._get("fame_get_precisions", "precision", key, name, range_, out)
 
     def get_numerics(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None:
         self._get("fame_get_numerics", "numeric", key, name, range_, out)
 
     def get_booleans(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None:
         self._get("fame_get_booleans", "boolean", key, name, range_, out)
         if self.boolean_missing_as_one:
@@ -549,11 +549,11 @@ class FakeNative:
             )
             out[missing] = 1
 
-    def get_dates(self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray) -> None:
+    def get_dates(self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray) -> None:
         self._get("fame_get_dates", "date", key, name, range_, out)
 
     def get_strings(
-        self, key: int, name: bytes, range_: RangeSpec | None, count: int
+        self, key: int, name: bytes, range_: FameRange | None, count: int
     ) -> list[bytes]:
         self._enter("fame_len_strings")
         self._enter("fame_get_strings")
@@ -565,7 +565,7 @@ class FakeNative:
         return values
 
     def _put(
-        self, function: str, kind: str, key: int, name: bytes, range_: RangeSpec | None, values: Any
+        self, function: str, kind: str, key: int, name: bytes, range_: FameRange | None, values: Any
     ) -> None:
         self._enter(function)
         # Keep exact-width NumPy scalars so that float32 bit patterns survive.
@@ -585,22 +585,22 @@ class FakeNative:
         self._write(key, name, kind, range_, list(array))
 
     def write_precisions(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, values: np.ndarray
     ) -> None:
         self._put("fame_write_precisions", "precision", key, name, range_, values)
 
     def write_numerics(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, values: np.ndarray
     ) -> None:
         self._put("fame_write_numerics", "numeric", key, name, range_, values)
 
     def write_booleans(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, values: np.ndarray
     ) -> None:
         self._put("fame_write_booleans", "boolean", key, name, range_, values)
 
     def write_dates(
-        self, key: int, name: bytes, range_: RangeSpec | None, type_code: int, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, type_code: int, values: np.ndarray
     ) -> None:
         obj = self._object(key, name)
         if obj.type_code != type_code:
@@ -608,7 +608,7 @@ class FakeNative:
             raise FakeStatus(S_TYPE_MISMATCH)
         self._put("fame_write_dates", "date", key, name, range_, values)
 
-    def write_strings(self, key: int, name: bytes, range_: RangeSpec | None, values: Any) -> None:
+    def write_strings(self, key: int, name: bytes, range_: FameRange | None, values: Any) -> None:
         self._enter("fame_write_strings")
         self._write(key, name, "string", range_, [bytes(v) for v in values])
 
@@ -933,7 +933,7 @@ def _write_descriptor(descriptor: int, data: bytes) -> None:
 
 
 class StatusAdapter:
-    """Wrap FakeNative so FakeStatus surfaces as FameError like the real binding."""
+    """Wrap FakeNative so FakeStatus surfaces as HLIError like the real binding."""
 
     def __init__(self, fake: FakeNative) -> None:
         self.fake = fake
@@ -944,12 +944,12 @@ class StatusAdapter:
             return attribute
 
         def call(*args: Any, **kwargs: Any) -> Any:
-            from famepy._errors import FameError
+            from famepy._errors import HLIError
 
             try:
                 return attribute(*args, **kwargs)
             except FakeStatus as failure:
-                raise FameError(failure.status, operation=name) from None
+                raise HLIError(failure.status, operation=name) from None
 
         return call
 

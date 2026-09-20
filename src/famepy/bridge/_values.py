@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT AND BSD-3-Clause
 # Conversion semantics adapted from FAME.jl (Bridge.jl); see licenses/FAME.jl.txt.
 # Copyright (c) 2020-2024, Bank of Canada. All rights reserved.
-"""Value conversions between Python/TimeSeriesEconPy values and raw FAME objects.
+"""Value conversions: ``refame`` and ``unfame`` between Python values and FAME objects.
 
 Representation table (Python value -> FAME object -> Python value):
 
@@ -88,13 +88,16 @@ from .._data import (
     RawSeries,
     classify_by_sentinel,
     namelist_members,
+    object_from_raw,
+    raw_of,
     sentinel_value,
 )
-from .._database import Database
+from .._database import FameDatabase
 from .._errors import DataValidationError
 from .._native import MAX_OBSERVATIONS
+from .._objects import FameObject
 from .._runtime import Session
-from .._text import VALUE_TEXT_POLICIES, decode_value, encode_value
+from .._text import VALUE_TEXT_POLICIES, decode_value, encode_value, object_name
 from ._frequencies import (
     fame_frequency,
     index_to_mit,
@@ -116,7 +119,9 @@ __all__ = [
     "Text",
     "check_policies",
     "from_fame",
+    "refame",
     "to_fame",
+    "unfame",
     "validate_value",
 ]
 
@@ -425,15 +430,40 @@ def _prepare(value: Any, empty: str, text: str = "ascii") -> _Prepared:
 # -- refame ---------------------------------------------------------------------
 
 
+def refame(
+    name: str | bytes,
+    value: Any,
+    *,
+    database: FameDatabase | None = None,
+    session: Session | None = None,
+    empty: str = "preserve",
+    text: str = "ascii",
+) -> FameObject:
+    """Convert ``value`` into a ``FameObject`` named ``name``, ready for ``do_write``.
+
+    See the module note for the representation table. The name is validated
+    first; type, dtype, frequency, exact integer conversion and text checks
+    happen before any native call, and the only native calls are read-only
+    calendar conversions (through ``database``'s session, ``session``, or
+    the current one). The caller's arrays, strings and bytes are never
+    modified. ``empty`` and ``text`` are the empty-series and string value
+    policies.
+    """
+    validated = object_name(name)
+    return object_from_raw(
+        validated, to_fame(value, database=database, session=session, empty=empty, text=text)
+    )
+
+
 def to_fame(
     value: Any,
     *,
-    database: Database | None = None,
+    database: FameDatabase | None = None,
     session: Session | None = None,
     empty: str = "preserve",
     text: str = "ascii",
 ) -> RawObject:
-    """Convert a Python value into a ``RawScalar`` or ``RawSeries`` (the reference's refame).
+    """Convert a Python value into an internal carrier (``refame`` without the name).
 
     Type, dtype, frequency, exact integer conversion and text checks happen
     before any native call; the only native calls are read-only calendar
@@ -532,6 +562,37 @@ def _check_case_range(first: int, count: int) -> None:
 # -- unfame ---------------------------------------------------------------------
 
 
+def unfame(
+    obj: FameObject,
+    *,
+    database: FameDatabase | None = None,
+    session: Session | None = None,
+    missing: str = "nan",
+    empty: str = "preserve",
+    empty_firstdate: MIT | None = None,
+    text: str = "ascii",
+) -> Any:
+    """Convert a ``FameObject`` that holds data into a Python value.
+
+    The object comes from ``do_read`` (or ``refame``); one without data is
+    refused. See the module note for the representation table and the
+    ``missing``, ``empty`` and ``text`` policies; ``empty_firstdate`` gives a
+    truly empty series the first date it does not store.
+    """
+    if not isinstance(obj, FameObject):
+        raise TypeError("unfame expects a FameObject; read it with do_read first.")
+    owner = owner_session(database, session)
+    raw = raw_of(obj, owner.sentinels.index_nc)
+    return from_fame(
+        raw,
+        session=owner,
+        missing=missing,
+        empty=empty,
+        empty_firstdate=empty_firstdate,
+        text=text,
+    )
+
+
 def _text(value: bytes, text: str) -> str | bytes:
     return decode_value(value, text)
 
@@ -548,14 +609,14 @@ def _check_raw_frequency(raw: RawObject) -> None:
 def from_fame(
     raw: RawObject,
     *,
-    database: Database | None = None,
+    database: FameDatabase | None = None,
     session: Session | None = None,
     missing: str = "nan",
     empty: str = "preserve",
     empty_firstdate: MIT | None = None,
     text: str = "ascii",
 ) -> Any:
-    """Convert a raw object into a Python value (the reference's unfame).
+    """Convert an internal carrier into a Python value (``unfame`` on a carrier).
 
     See the module note for the representation table and the policies.
     """

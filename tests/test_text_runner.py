@@ -7,10 +7,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from canonical import write
 from fake_native import make_fake
 
 import famepy
-from famepy import bridge, validation
+from famepy import validation
 from famepy.validation import _groups, _report, _text_group
 from famepy.validation._process import WorkerResult
 
@@ -160,9 +161,9 @@ def test_configured_julia_makes_the_text_cases_required(tmp_path, monkeypatch):
 STAND_IN = r"""
 import json, os, sys
 sys.path.insert(0, os.environ["FAMEPY_TESTS"])
+from canonical import value, write
 from fake_native import make_fake
 import famepy
-from famepy import bridge
 from famepy.validation._text_group import TEXT_CORPUS, write_form
 script, python_path, julia_path, result_path, token = sys.argv[1:6]
 mode = os.environ.get("STAND_IN_MODE", "faithful")
@@ -176,24 +177,24 @@ def slice_like_the_reference(value):
     if data and data[-1] >= 0x80:
         raise IndexError
     return value
-with famepy.open_database(julia_path, "create", session=session) as db:
+with famepy.opendb(julia_path, "create", session=session) as db:
     for fixture in TEXT_CORPUS:
         if fixture.reference == "python":
             continue
-        value = write_form(fixture)
+        item = write_form(fixture)
         if mode == "corrupt" and fixture.label == "ascii":
-            value = "Hello, FAME 2027"
-        bridge.write_value(db, fixture.name, value, text="utf-8")
+            item = "Hello, FAME 2027"
+        write(db, fixture.name, item, text="utf-8")
         result["write:" + fixture.label] = "ok"
-    db.post()
+    famepy.postdb(db)
 for prefix, path in (("read", julia_path), ("python", python_path)):
-    with famepy.open_database(path, session=session) as db:
+    with famepy.opendb(path, session=session) as db:
         for fixture in TEXT_CORPUS:
             if fixture.reference == "python":
                 continue
             label = fixture.label
             try:
-                got = bridge.read_value(db, fixture.name, text="utf-8")
+                got = value(db, fixture.name, text="utf-8")
                 got = list(got.values) if fixture.is_vector else got
                 items = got if fixture.is_vector else [got]
                 for item in items:
@@ -225,10 +226,10 @@ def _text_context(tmp_path, monkeypatch, mode="faithful"):
     fake = make_fake(persist=True)
     session = famepy.Session(native=fake).initialize()
     python_path = tmp_path / "text.db"
-    with famepy.open_database(python_path, "create", session=session) as db:
+    with famepy.opendb(python_path, "create", session=session) as db:
         for fixture in _text_group.TEXT_CORPUS:
-            bridge.write_value(db, fixture.name, _text_group.write_form(fixture), text="utf-8")
-        db.post()
+            write(db, fixture.name, _text_group.write_form(fixture), text="utf-8")
+        famepy.postdb(db)
     recorder = _report.Recorder()
     julia = {"executable": sys.executable, "project": str(stand_in)}
     ctx = _groups.Context(session, tmp_path, recorder, lambda e: [], 60.0, julia, {})
@@ -300,10 +301,10 @@ def test_adopt_rejects_malformed_outcomes(tmp_path):
     fake = make_fake(persist=True)
     session = famepy.Session(native=fake).initialize()
     julia_path = tmp_path / "julia_text.db"
-    with famepy.open_database(julia_path, "create", session=session) as db:
+    with famepy.opendb(julia_path, "create", session=session) as db:
         for fixture in _text_group.TEXT_CORPUS:
-            bridge.write_value(db, fixture.name, _text_group.write_form(fixture), text="utf-8")
-        db.post()
+            write(db, fixture.name, _text_group.write_form(fixture), text="utf-8")
+        famepy.postdb(db)
     recorder = _report.Recorder()
     ctx = _groups.Context(session, tmp_path, recorder, lambda e: [], 60.0, None, {})
     payload = {
@@ -372,14 +373,14 @@ def test_absence_check_does_not_accept_unrelated_native_error(tmp_path, monkeypa
 
     def failing_lookup(database, name):
         if name in ("REFUSED_A", "REFUSED_B", "REFUSED_C"):
-            raise famepy.FameError(97, operation="quick_info")
+            raise famepy.HLIError(97, operation="quick_info")
         return original(database, name)
 
     monkeypatch.setattr(famepy, "quick_info", failing_lookup)
     _text_group.group_text(ctx)
     case = next(c for c in recorder.cases if c.id == "refusals_left_no_object")
     assert case.status == "fail"
-    assert case.error_type == "FameError"
+    assert case.error_type == "HLIError"
     assert [c for c in recorder.cases if c.status == "fail"] == [case]
     assert len(verification_requests) == 1
     assert verification_requests[0][0] == "cross_process"

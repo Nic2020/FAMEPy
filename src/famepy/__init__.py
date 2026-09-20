@@ -1,15 +1,28 @@
 # SPDX-License-Identifier: MIT
-"""FAME CHLI bindings and TimeSeriesEconPy integration; import never loads CHLI.
+"""FAME CHLI bindings with TimeSeriesEconPy integration, spelled as FAME.jl spells them.
 
-Runtime: ``initialize()``, ``finalize()``, ``version()`` (one-shot per process;
-``reset()`` is unsupported and raises).
-Databases: ``open_database()``, ``work_database()``, ``Database``.
-Objects: ``quick_info()``, ``list_objects()``, ``read_object()``, ``write_object()``.
-Commands: ``run_command()``. The TimeSeriesEconPy bridge (values, every
-reference frequency anchor, workspaces) lives in ``famepy.bridge``.
+Import never loads CHLI. The public names are the reference's:
+
+* runtime: ``init_chli()``, ``close_chli()``, ``version()``, ``check_status()``
+  and ``HLIError`` (one initialization per process; finalization is terminal);
+* databases: ``FameDatabase``, ``opendb()``, ``workdb()``, ``postdb()``,
+  ``closedb()``;
+* objects: ``FameObject``, ``quick_info()``, ``listdb()``, ``do_read()``,
+  ``do_write()``;
+* commands: ``fame()``;
+* the TimeSeriesEconPy bridge: ``refame()``, ``unfame()``, ``readfame()``,
+  ``writefame()``; carriers, policies and report variants live in
+  ``famepy.bridge``.
+
+Names the reference ends with ``!`` lose the mark (``closedb``, ``do_read``);
+``class`` is spelled ``class_`` where it is a keyword; do-block forms are
+context managers. Everything else here (the code tables, ``Session``,
+``delete_object``, the missing-value helpers, ``diagnose``, ``Period``
+conversions, ``famepy.migration``, ``famepy.validation``,
+``famepy.benchmarks``) is an extension without a reference spelling.
 """
 
-from ._command import expand_input, run_command
+from ._command import expand_input, fame
 from ._constants import (
     FREQUENCIES,
     AccessMode,
@@ -21,22 +34,18 @@ from ._constants import (
     frequency_name,
 )
 from ._data import (
-    RawScalar,
-    RawSeries,
     classify_by_sentinel,
     delete_object,
+    do_read,
+    do_write,
     missing_type,
     namelist_members,
-    read_object,
-    scalar,
-    series,
-    write_object,
 )
-from ._database import Database, open_database, work_database
+from ._database import FameDatabase, closedb, opendb, postdb, workdb
 from ._errors import (
     CommandError,
     DataValidationError,
-    FameError,
+    HLIError,
     IncludeError,
     InheritedRuntimeError,
     LibraryLoadError,
@@ -50,32 +59,57 @@ from ._errors import (
     UnsupportedPlatformError,
     check_status,
 )
-from ._native import RangeSpec, Sentinels
-from ._objects import ObjectInfo, Period, index_to_period, period_to_index, quick_info
+from ._native import FameRange, Sentinels
+from ._objects import FameObject, Period, index_to_period, period_to_index, quick_info
 from ._runtime import (
     ExtendedErrorRetrieval,
     Session,
+    close_chli,
     current_session,
     default_session,
-    finalize,
-    initialize,
+    init_chli,
     reset,
     version,
 )
 from ._text import TextEncodingError, from_native, to_native
-from ._wildcard import is_wildcard, list_objects
+from ._wildcard import is_wildcard, listdb
+from .bridge._values import refame, unfame
+from .bridge._workspace import readfame, writefame
 from .diagnostics import diagnose
 
-__version__ = "0.1.0rc1"
+__version__ = "0.1.0rc2"
 __all__ = [
+    # Reference exports.
+    "FameDatabase",
+    "FameObject",
+    "check_status",
+    "closedb",
+    "do_read",
+    "do_write",
+    "fame",
+    "listdb",
+    "opendb",
+    "postdb",
+    "quick_info",
+    "readfame",
+    "refame",
+    "unfame",
+    "version",
+    "workdb",
+    "writefame",
+    # Reference qualified names.
+    "FameRange",
+    "HLIError",
+    "Period",
+    "close_chli",
+    "init_chli",
+    # Extensions.
     "FREQUENCIES",
     "AccessMode",
     "Basis",
     "CommandError",
     "DataValidationError",
-    "Database",
     "ExtendedErrorRetrieval",
-    "FameError",
     "IncludeError",
     "InheritedRuntimeError",
     "LibraryLoadError",
@@ -83,13 +117,8 @@ __all__ = [
     "LicensingConfigurationError",
     "NameTruncatedError",
     "ObjectClass",
-    "ObjectInfo",
     "ObjectType",
     "Observed",
-    "Period",
-    "RangeSpec",
-    "RawScalar",
-    "RawSeries",
     "RuntimeStateError",
     "Sentinels",
     "Session",
@@ -98,33 +127,20 @@ __all__ = [
     "TextEncodingError",
     "UnsupportedOperationError",
     "UnsupportedPlatformError",
-    "check_status",
     "classify_by_sentinel",
     "current_session",
     "default_session",
     "delete_object",
     "diagnose",
     "expand_input",
-    "finalize",
     "frequency_code",
     "frequency_name",
     "from_native",
     "index_to_period",
-    "initialize",
     "is_wildcard",
-    "list_objects",
     "missing_type",
     "namelist_members",
-    "open_database",
     "period_to_index",
-    "quick_info",
-    "read_object",
     "reset",
-    "run_command",
-    "scalar",
-    "series",
     "to_native",
-    "version",
-    "work_database",
-    "write_object",
 ]

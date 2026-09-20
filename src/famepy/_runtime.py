@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._discovery import Candidate, discover
 from ._errors import (
-    FameError,
+    HLIError,
     InheritedRuntimeError,
     LibraryLoadError,
     LicensingConfigurationError,
@@ -41,7 +41,7 @@ from ._errors import (
 from ._native import CtypesNative, NativeInterface, Sentinels, read_extended_error
 
 if TYPE_CHECKING:
-    from ._database import Database
+    from ._database import FameDatabase
 
 LOCK = threading.RLock()
 
@@ -191,8 +191,8 @@ class Session:
         self._state = "created" if native is None else "loaded"
         self._generation = 0
         self._sentinels: Sentinels | None = None
-        self._databases: dict[int, Database] = {}
-        self._work: Database | None = None
+        self._databases: dict[int, FameDatabase] = {}
+        self._work: FameDatabase | None = None
         self._version: float | None = None
         self._last_extended_error: bytes | None = None
         self.extended_error_retrieval: ExtendedErrorRetrieval | None = None
@@ -231,7 +231,7 @@ class Session:
         return self._sentinels
 
     @property
-    def open_databases(self) -> tuple[Database, ...]:
+    def open_databases(self) -> tuple[FameDatabase, ...]:
         return tuple(self._databases.values())
 
     def __repr__(self) -> str:
@@ -312,7 +312,7 @@ class Session:
         try:
             native.finalize()
         except BaseException as error:
-            if isinstance(error, FameError):
+            if isinstance(error, HLIError):
                 self.finalize_status = error.status
             failure.__notes__ = [*getattr(failure, "__notes__", []), "cleanup cfmfin failed"]
             return
@@ -343,7 +343,7 @@ class Session:
             for database in list(self._databases.values()):
                 try:
                     native.close_database(database.key)
-                except FameError as error:
+                except HLIError as error:
                     statuses.append(error.status)
                 database._invalidate()
             self._databases.clear()
@@ -354,7 +354,7 @@ class Session:
             self._state = "broken"
             try:
                 native.finalize()
-            except FameError as error:
+            except HLIError as error:
                 self.finalize_status = error.status
                 self._state = "broken"
                 raise
@@ -375,7 +375,7 @@ class Session:
     def operation(self, name: str) -> Iterator[NativeInterface]:
         """Hold the process lock for a complete native operation.
 
-        A FameError raised inside gets the opt-in extended text attached
+        A HLIError raised inside gets the opt-in extended text attached
         before the lock is released and before any other native call.
         """
         self._check_process()
@@ -388,14 +388,14 @@ class Session:
                 raise RuntimeStateError(f"CHLI must be initialized before {name}.")
             try:
                 yield self._native
-            except FameError as error:
+            except HLIError as error:
                 self._attach_extended_error(self._native, error)
                 raise
 
-    def _register(self, database: Database) -> None:
+    def _register(self, database: FameDatabase) -> None:
         self._databases[database.key] = database
 
-    def _unregister(self, database: Database) -> None:
+    def _unregister(self, database: FameDatabase) -> None:
         self._databases.pop(database.key, None)
         if self._work is database:
             self._work = None
@@ -420,7 +420,7 @@ class Session:
         self._last_extended_error = text
         return text
 
-    def _attach_extended_error(self, native: NativeInterface, error: FameError) -> None:
+    def _attach_extended_error(self, native: NativeInterface, error: HLIError) -> None:
         if error.extended_captured or self.extended_error_retrieval is None:
             return
         error.extended_captured = True
@@ -449,7 +449,7 @@ class Session:
         if self.extended_error_retrieval is None:
             raise UnsupportedOperationError(
                 "Extended error text is off by default; call enable_extended_errors() to "
-                "capture it at the next failure. Status codes remain available on FameError."
+                "capture it at the next failure. Status codes remain available on HLIError."
             )
         with LOCK:
             if self._last_extended_error is None:
@@ -497,12 +497,17 @@ def default_session(
         return _DEFAULT
 
 
-def initialize(
+def init_chli(
     library: str | os.PathLike[str] | None = None,
     *,
     root: str | os.PathLike[str] | None = None,
 ) -> Session:
-    """Discover, load and initialize the process default session (once)."""
+    """Load the CHLI library and initialize FAME once per process; return the session.
+
+    Unlike the reference, a second call after ``close_chli()`` does not
+    restart the library: CHLI initializes once per process and finalization
+    is terminal, so it raises ``RuntimeStateError`` before any native call.
+    """
     _check_not_inherited()
     with LOCK:
         if _OWNER is not None and _OWNER.is_terminal:
@@ -526,7 +531,7 @@ def current_session() -> Session:
     _check_not_inherited()
     with LOCK:
         if _OWNER is None:
-            raise RuntimeStateError("No session is initialized; call famepy.initialize().")
+            raise RuntimeStateError("No session is initialized; call famepy.init_chli().")
         if _OWNER.is_terminal:
             raise RuntimeStateError(
                 f"The process runtime is {_OWNER.state}; no session is usable. {_ONE_SHOT}"
@@ -534,8 +539,12 @@ def current_session() -> Session:
         return _OWNER
 
 
-def finalize() -> None:
-    """Finalize the process owner; harmless when there is none or it is terminal."""
+def close_chli() -> None:
+    """Finalize FAME for this process; harmless when nothing is initialized.
+
+    This is the last native call the process makes: no session can initialize
+    afterwards, and every database handle becomes stale.
+    """
     with LOCK:
         if _OWNER is not None:
             _OWNER.finalize()

@@ -53,7 +53,7 @@ from tsecon import (
 from tsecon.frequencies import Frequency, YPFrequency
 
 from .._constants import FREQUENCIES, FREQUENCY_CASE, FREQUENCY_NAMES, frequency_code
-from .._database import Database
+from .._database import FameDatabase
 from .._errors import DataValidationError, UnsupportedOperationError
 from .._native import _int32
 from .._runtime import Session, current_session
@@ -285,7 +285,7 @@ def year_period_to_mit(frequency: Frequency, year: int, period: int) -> MIT:
 # -- index conversions through the library -----------------------------------
 
 
-def owner_session(database: Database | None = None, session: Session | None = None) -> Session:
+def owner_session(database: FameDatabase | None = None, session: Session | None = None) -> Session:
     """The session that performs conversions: the database's, the given one, or the current."""
     if database is not None:
         if session is not None and session is not database.session:
@@ -297,7 +297,7 @@ def owner_session(database: Database | None = None, session: Session | None = No
 
 
 def mit_to_index(
-    mit: MIT, *, database: Database | None = None, session: Session | None = None
+    mit: MIT, *, database: FameDatabase | None = None, session: Session | None = None
 ) -> int:
     """The library index of a moment, through the library's calendar.
 
@@ -323,7 +323,7 @@ def index_to_mit(
     index: int,
     code: Any,
     *,
-    database: Database | None = None,
+    database: FameDatabase | None = None,
     session: Session | None = None,
 ) -> MIT:
     """The moment of a library index at a supported frequency code.

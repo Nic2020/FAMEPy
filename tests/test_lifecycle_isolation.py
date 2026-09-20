@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from canonical import read, scalar_object, series_object, value, write
 from fake_native import FINITE_SENTINELS, SENTINELS, make_fake, make_finite_sentinel_backend
 from tsecon import TSeries, mm
 
@@ -88,9 +89,9 @@ def finite_db(tmp_path):
     adapter = make_finite_sentinel_backend()
     adapter.fake.persist = False
     session = famepy.Session(native=adapter).initialize()
-    database = famepy.open_database("finite", "create", session=session)
+    database = famepy.opendb("finite", "create", session=session)
     yield database
-    database.close()
+    famepy.closedb(database)
     session.finalize()
 
 
@@ -111,56 +112,57 @@ def test_raw_round_trip_preserves_finite_sentinels(finite_db):
     s = finite_db.session.sentinels
     assert s is FINITE_SENTINELS
     values = np.array([1.0, s.precision_nc, s.precision_na, s.precision_nd, 2.0])
-    famepy.write_object(finite_db, "p", famepy.series("precision", "monthly", 0, values))
-    raw = famepy.read_object(finite_db, "p")
-    assert np.array_equal(raw.values, values)
-    assert not np.isnan(raw.values).any()
-    codes = famepy.classify_by_sentinel(raw.values, "precision", s)
+    famepy.do_write(series_object("p", "precision", "monthly", 0, values), finite_db)
+    raw = read(finite_db, "p")
+    assert np.array_equal(raw.data, values)
+    assert not np.isnan(raw.data).any()
+    codes = famepy.classify_by_sentinel(raw.data, "precision", s)
     assert codes.tolist() == [0, 1, 2, 3, 0]
-    assert [famepy.missing_type(finite_db, "precision", v) for v in raw.values] == [0, 1, 2, 3, 0]
+    assert [famepy.missing_type(finite_db, "precision", v) for v in raw.data] == [0, 1, 2, 3, 0]
     numeric = np.array([s.numeric_nc, np.float32(1.5), s.numeric_nd], dtype=np.float32)
-    famepy.write_object(finite_db, "n", famepy.series("numeric", "monthly", 0, numeric))
-    got = famepy.read_object(finite_db, "n").values
+    famepy.do_write(series_object("n", "numeric", "monthly", 0, numeric), finite_db)
+    got = read(finite_db, "n").data
     assert np.array_equal(got.view(np.uint32), numeric.view(np.uint32))
     assert famepy.classify_by_sentinel(got, "numeric", s).tolist() == [1, 0, 3]
     assert [famepy.missing_type(finite_db, "numeric", v) for v in got] == [1, 0, 3]
-    famepy.write_object(finite_db, "ps", famepy.scalar("precision", s.precision_na))
-    scalar = famepy.read_object(finite_db, "ps").value
+    famepy.do_write(scalar_object("ps", "precision", s.precision_na), finite_db)
+    scalar = read(finite_db, "ps").data
     assert scalar == s.precision_na and famepy.missing_type(finite_db, "precision", scalar) == 2
     # An ordinary NaN is a normal value under this profile, not a missing code.
-    famepy.write_object(finite_db, "nan", famepy.scalar("precision", math.nan))
-    assert (
-        famepy.missing_type(finite_db, "precision", famepy.read_object(finite_db, "nan").value) == 0
-    )
+    famepy.do_write(scalar_object("nan", "precision", math.nan), finite_db)
+    assert famepy.missing_type(finite_db, "precision", read(finite_db, "nan").data) == 0
 
 
 def test_bridge_missing_conventions_under_finite_sentinels(finite_db):
     s = finite_db.session.sentinels
     ts = TSeries(mm(2020, 1), np.array([1.0, np.nan, 3.0]))
-    bridge.write_tseries(finite_db, "ts", ts)
-    raw = famepy.read_object(finite_db, "ts")
-    assert raw.values[1] == s.precision_nc and not np.isnan(raw.values[1])
-    back = bridge.read_tseries(finite_db, "ts")
+    write(finite_db, "ts", ts)
+    raw = read(finite_db, "ts")
+    assert raw.data[1] == s.precision_nc and not np.isnan(raw.data[1])
+    back = value(finite_db, "ts")
     assert np.array_equal(back.values, ts.values, equal_nan=True)
     with pytest.raises(bridge.MissingValueError):
-        bridge.read_tseries(finite_db, "ts", missing="strict")
-    famepy.write_object(
-        finite_db,
-        "all",
-        famepy.series(
-            "precision", "monthly", 0, np.array([s.precision_nc, s.precision_na, s.precision_nd])
+        value(finite_db, "ts", missing="strict")
+    famepy.do_write(
+        series_object(
+            "all",
+            "precision",
+            "monthly",
+            0,
+            np.array([s.precision_nc, s.precision_na, s.precision_nd]),
         ),
+        finite_db,
     )
-    assert np.isnan(bridge.read_tseries(finite_db, "all").values).all()
-    bridge.write_scalar(finite_db, "sc", math.nan)
-    stored = famepy.read_object(finite_db, "sc").value
-    assert stored == s.precision_nc and math.isnan(bridge.read_scalar(finite_db, "sc"))
+    assert np.isnan(value(finite_db, "all").values).all()
+    write(finite_db, "sc", math.nan)
+    stored = read(finite_db, "sc").data
+    assert stored == s.precision_nc and math.isnan(value(finite_db, "sc"))
     with pytest.raises(bridge.MissingValueError):
-        bridge.read_scalar(finite_db, "sc", missing="strict")
-    bridge.write_tseries(finite_db, "empty", TSeries(mm(2020, 3), np.empty(0)), empty="reference")
-    stored_empty = famepy.read_object(finite_db, "empty")
-    assert stored_empty.values[0] == s.precision_na
-    assert len(bridge.read_tseries(finite_db, "empty", empty="reference")) == 0
+        value(finite_db, "sc", missing="strict")
+    write(finite_db, "empty", TSeries(mm(2020, 3), np.empty(0)), empty="reference")
+    stored_empty = read(finite_db, "empty")
+    assert stored_empty.data[0] == s.precision_na
+    assert len(value(finite_db, "empty", empty="reference")) == 0
 
 
 @pytest.mark.parametrize("failure_type", [KeyboardInterrupt, OSError])
@@ -239,4 +241,4 @@ def test_module_initialize_rejects_inherited_active_default(monkeypatch):
     monkeypatch.setattr(_runtime, "_DEFAULT", owner)
     _runtime._after_fork()
     with pytest.raises(famepy.InheritedRuntimeError):
-        famepy.initialize()
+        famepy.init_chli()

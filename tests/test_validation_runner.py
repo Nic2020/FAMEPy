@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from canonical import scalar_object
 from fake_native import PRIVATE_MARKER, SENTINELS, make_fake
 
 import famepy
@@ -452,12 +453,12 @@ def test_child_payload_gates(
 def test_verification_compares_metadata_and_bits():
     fake = make_fake(persist=False)
     session = famepy.Session(native=fake).initialize()
-    database = famepy.open_database("mem", "create", session=session)
-    famepy.write_object(database, "x", famepy.scalar("precision", 1.0))
+    database = famepy.opendb("mem", "create", session=session)
+    famepy.do_write(scalar_object("x", "precision", 1.0), database)
     # "nc" itself is a name the library (and the model) reserves.
-    famepy.write_object(database, "ncs", famepy.scalar("precision", SENTINELS.precision_nc))
-    database.post()
-    database.close()
+    famepy.do_write(scalar_object("ncs", "precision", SENTINELS.precision_nc), database)
+    famepy.postdb(database)
+    famepy.closedb(database)
     recorder = _report.Recorder()
     manifest = {
         "database": "mem",
@@ -556,7 +557,7 @@ def test_recorder_records_no_return_values():
 
 def test_wheel_identity_compares_shipped_sources(tmp_path):
     package_dir = Path(famepy.__file__).resolve().parent
-    wheel = tmp_path / "famepy-0.1.0rc1-py3-none-any.whl"
+    wheel = tmp_path / "famepy-0.1.0rc2-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         for file in package_dir.rglob("*.py"):
             archive.write(file, "famepy/" + file.relative_to(package_dir).as_posix())

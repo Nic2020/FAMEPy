@@ -147,7 +147,7 @@ def test_refused_kind_blocks_only_its_dependents(tmp_path, child_env):
     assert cases["write_kinds"]["status"] == "fail"
     primary = cases["write_kind:boolean_scalar"]
     assert primary["status"] == "fail" and primary["status_code"] == 25
-    assert primary["error_type"] == "FameError"
+    assert primary["error_type"] == "HLIError"
     assert cases["kind:boolean_scalar"]["status"] == "blocked"
     for later in ("date_scalar", "namelist", "numeric_series", "string_series"):
         assert cases[f"write_kind:{later}"]["status"] == "pass"

@@ -6,7 +6,56 @@ and only that reviewed artifact is promoted to the index (see
 [releasing](docs/releasing.md)). An entry marked *unreleased* has not been
 promoted.
 
-## 0.1.0rc1 (unreleased)
+## 0.1.0rc2 (unreleased)
+
+Second release candidate: the public API is spelled as FAME.jl spells it.
+This is a breaking prerelease change; no descriptive-name aliases are kept.
+The native evidence recorded for the first candidate stands for the
+unchanged storage, conversion and ABI behavior; the renamed object model is
+requalified by the next campaign before this candidate is promoted.
+
+Renamed (0.1.0rc1 name -> 0.1.0rc2 name):
+
+- `initialize` / `finalize` -> `init_chli` / `close_chli`; `FameError` ->
+  `HLIError`; `RangeSpec` -> `FameRange`.
+- `Database` / `open_database` / `work_database` -> `FameDatabase` /
+  `opendb` / `workdb`; the `post()` and `close()` methods -> `postdb(db)`
+  and `closedb(db)` (which returns the handle).
+- `ObjectInfo` and the raw carriers `RawScalar`, `RawSeries`, `scalar`,
+  `series` -> one `FameObject(name, class_, type, freq, first_index,
+  last_index, data)` that `quick_info` and `listdb` return without data,
+  `do_read(obj, db)` fills in place and `do_write(obj, db)` writes;
+  `read_object(db, name, first_index=, last_index=)` -> `do_read` with the
+  range set on the object; `write_object(db, name, raw)` -> `do_write`.
+- `list_objects(db, pattern, classes=, types=, frequencies=)` ->
+  `listdb(db, wildcard, class_=, type=, freq=)`, also for a path.
+- `run_command` -> `fame`.
+- `bridge.to_fame(value)` / `bridge.from_fame(raw)` -> `refame(name, value)`
+  / `unfame(obj)`; `bridge.read_workspace` / `bridge.write_workspace` ->
+  `readfame` / `writefame` (package level) with the `class_`, `type` and
+  `freq` filter keywords; their `*_report` variants -> `bridge.readfame_report`
+  and `bridge.writefame_report`.
+- Removed without a replacement name: the single-object helpers
+  `bridge.read_value`, `write_value`, `read_tseries`, `write_tseries`,
+  `read_scalar`, `write_scalar`, `from_tseries`, `to_tseries` and
+  `raw_kind`; a single object is `unfame(do_read(quick_info(db, name), db))`
+  and `do_write(refame(name, value), db)`, as in the reference.
+
+`do_write(obj, db)` now replaces an existing object by default, matching
+FAME.jl. Pass `replace=False` to refuse replacement. Input validation still
+precedes deletion; a native failure after deletion cannot restore the old
+object. Path writers still require an explicit `mode`.
+
+Unchanged: the other safety decisions of the first candidate (one-shot lifecycle,
+explicit path write modes, validation before any destructive call,
+redaction, the
+missing, empty and text policies, the case-frequency refusal, whole-value
+UTF-8 decoding), the carriers `NameList`, `Text`, `DateSeries` and
+`StringSeries`, the frequency helpers, `famepy.migration`,
+`famepy.validation` and `famepy.benchmarks`. The parity ledger marks the
+changed signatures and the behaviors that stay deliberately different.
+
+## 0.1.0rc1
 
 First release candidate. FAMEPy is a pure-Python package that binds the
 FAME CHLI library through `ctypes`, with the behavior of

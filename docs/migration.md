@@ -13,7 +13,7 @@ import famepy
 from famepy import migration
 from tsecon.dataecon import open_dataecon
 
-famepy.initialize()
+famepy.init_chli()
 plan = migration.plan_migration("source.db")  # source opened read-only
 print(plan.summary())  # refusals, skips, losses
 report = migration.migrate("source.db", "archive.daec", plan=plan)

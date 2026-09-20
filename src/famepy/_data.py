@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: MIT AND BSD-3-Clause
 # Read/write semantics adapted from FAME.jl (Read.jl, Write.jl); see licenses/FAME.jl.txt.
 # Copyright (c) 2020-2024, Bank of Canada. All rights reserved.
-"""Raw object I/O with owning typed carriers that preserve native encodings.
+"""Object data I/O: ``do_read`` and ``do_write`` over validated owning carriers.
 
-Value kinds and their storage:
+Value kinds and their storage on a ``FameObject``:
 
-| kind      | scalar value (read)   | series values           |
+| kind      | scalar data (read)    | series data             |
 |-----------|-----------------------|-------------------------|
 | precision | numpy float64 scalar  | float64 array           |
 | numeric   | numpy float32 scalar  | float32 array           |
@@ -18,7 +18,7 @@ A namelist value is the library's own text of the list (braces, comma
 separated members). The library documents that it may lay that text out
 differently from what was written, so ``namelist_members`` parses the
 returned bytes into the ordered members under a strict grammar; the raw
-bytes are kept untouched on the scalar.
+bytes are kept untouched on the object.
 
 Reads return exact-width NumPy scalars so that every bit pattern, including
 NaN payloads used as missing encodings, survives a round trip. Writes accept
@@ -27,14 +27,15 @@ float32 by NumPy (pass ``numpy.float32`` to control the exact encoding).
 Missing observations keep their native NC/NA/ND encodings. Reads allocate new
 buffers; writes validate the caller's buffer and never modify or convert it.
 
-Every Python-side validation of a write completes before the first native
-call, so an invalid input never deletes or creates an object.
+``RawScalar`` and ``RawSeries`` are the internal validated carriers behind a
+``FameObject``'s data: every Python-side validation of a write completes
+while building them, before the first native call, so an invalid input never
+deletes or creates an object.
 """
 
 from __future__ import annotations
 
 import enum
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,10 +56,10 @@ from ._constants import (
     is_date_type,
     type_code,
 )
-from ._database import Database
-from ._errors import HNOOBJ, DataValidationError, FameError
-from ._native import MAX_OBSERVATIONS, RangeSpec, Sentinels, check_buffer
-from ._objects import ObjectInfo, check_supported_class, query_info
+from ._database import FameDatabase
+from ._errors import HNOOBJ, DataValidationError, HLIError
+from ._native import MAX_OBSERVATIONS, FameRange, Sentinels, check_buffer
+from ._objects import FameObject, check_supported_class, query_info
 from ._text import object_name, to_native
 
 KINDS = ("precision", "numeric", "boolean", "date", "string", "namelist")
@@ -268,10 +269,10 @@ class RawSeries:
             return self.date_frequency
         return _TYPE_CODES[self.kind]
 
-    def range(self) -> RangeSpec | None:
+    def range(self) -> FameRange | None:
         if self.is_empty:
             return None
-        return RangeSpec(self.frequency, self.first_index, self.first_index + len(self.values) - 1)
+        return FameRange(self.frequency, self.first_index, self.first_index + len(self.values) - 1)
 
 
 RawObject = RawScalar | RawSeries
@@ -280,7 +281,7 @@ RawObject = RawScalar | RawSeries
 # -- missing-value classification ------------------------------------------
 
 
-def missing_type(database: Database, kind: str, value: Any) -> int:
+def missing_type(database: FameDatabase, kind: str, value: Any) -> int:
     """Classify one value with the library's own classifier (0 normal, 1 NC, 2 NA, 3 ND)."""
     if kind not in KINDS or kind == "namelist":
         raise ValueError("Classification supports precision, numeric, boolean, date and string.")
@@ -355,7 +356,7 @@ def sentinel_value(kind: str, category: int, sentinels: Sentinels) -> Any:
 
 
 def _read_values(
-    native: Any, key: int, name: bytes, kind: str, range_: RangeSpec | None, count: int
+    native: Any, key: int, name: bytes, kind: str, range_: FameRange | None, count: int
 ) -> Any:
     if kind == "string":
         return native.get_strings(key, name, range_, count)
@@ -380,49 +381,173 @@ def _check_index(value: int | None, what: str) -> None:
         raise DataValidationError(f"{what} must fit a signed 64-bit index.")
 
 
-def read_object(
-    database: Database,
-    name: str | bytes | ObjectInfo,
+def read_named(
+    database: FameDatabase,
+    name: str | bytes,
     *,
     first_index: int | None = None,
     last_index: int | None = None,
 ) -> RawObject:
-    """Read a scalar or a series (whole range or an explicit subrange).
+    """Read a scalar or a series by name (whole range or an explicit subrange).
 
-    Metadata and data are obtained in one locked operation, so the type and
-    range used to size the buffer are those of the object actually read. An
-    ``ObjectInfo`` argument supplies the name only; metadata is re-queried.
+    Internal carrier read: metadata and data are obtained in one locked
+    operation, so the type and range used to size the buffer are those of
+    the object actually read. ``do_read`` is the public form.
     """
-    text = name.name if isinstance(name, ObjectInfo) else to_native(name, what="object name")
+    text = to_native(name, what="object name")
     _check_index(first_index, "first_index")
     _check_index(last_index, "last_index")
     with database.operation("read object") as native:
-        key = database.key
-        info = query_info(native, key, text)
-        check_supported_class(info)
-        kind = _kind_from_type(info.type_code)
-        if info.is_scalar:
-            if first_index is not None or last_index is not None:
-                raise DataValidationError("A scalar has no range to select.")
-            if kind == "namelist":
-                return RawScalar("namelist", native.get_namelist(key, info.name))
-            values = _read_values(native, key, info.name, kind, None, 1)
-            return RawScalar(kind, values[0], info.date_frequency)
-        index_nc = database.session.sentinels.index_nc
+        info = query_info(native, database.key, text)
+        return _read_locked(native, database, info, first_index, last_index)
+
+
+def _read_locked(
+    native: Any,
+    database: FameDatabase,
+    info: FameObject,
+    first_index: int | None,
+    last_index: int | None,
+) -> RawObject:
+    key = database.key
+    check_supported_class(info)
+    kind = _kind_from_type(info.type_code)
+    if info.is_scalar:
+        if first_index is not None or last_index is not None:
+            raise DataValidationError("A scalar has no range to select.")
         if kind == "namelist":
-            raise DataValidationError("A namelist is always a scalar object.")
-        if info.is_empty(index_nc):
-            if first_index is not None or last_index is not None:
-                raise DataValidationError("An empty series has no observations to select.")
-            empty: Any = [] if kind == "string" else np.empty(0, dtype=_DTYPES[kind])
-            return RawSeries(kind, info.frequency, index_nc, empty, info.date_frequency)
-        first = info.first_index if first_index is None else int(first_index)
-        last = info.last_index if last_index is None else int(last_index)
-        if first < info.first_index or last > info.last_index:
-            raise DataValidationError("The requested subrange lies outside the stored range.")
-        range_ = RangeSpec(info.frequency, first, last)
-        values = _read_values(native, key, info.name, kind, range_, range_.length)
-        return RawSeries(kind, info.frequency, first, values, info.date_frequency)
+            return RawScalar("namelist", native.get_namelist(key, info.name))
+        values = _read_values(native, key, info.name, kind, None, 1)
+        return RawScalar(kind, values[0], info.date_frequency)
+    index_nc = database.session.sentinels.index_nc
+    if kind == "namelist":
+        raise DataValidationError("A namelist is always a scalar object.")
+    if info.is_empty(index_nc):
+        if first_index is not None or last_index is not None:
+            raise DataValidationError("An empty series has no observations to select.")
+        empty: Any = [] if kind == "string" else np.empty(0, dtype=_DTYPES[kind])
+        return RawSeries(kind, info.frequency, index_nc, empty, info.date_frequency)
+    assert info.first_index is not None and info.last_index is not None
+    first = info.first_index if first_index is None else int(first_index)
+    last = info.last_index if last_index is None else int(last_index)
+    if first < info.first_index or last > info.last_index:
+        raise DataValidationError("The requested subrange lies outside the stored range.")
+    range_ = FameRange(info.frequency, first, last)
+    values = _read_values(native, key, info.name, kind, range_, range_.length)
+    return RawSeries(kind, info.frequency, first, values, info.date_frequency)
+
+
+def do_read(obj: FameObject, db: FameDatabase) -> FameObject:
+    """Read the object's data from the database into ``obj`` and return it.
+
+    The object's class, type and frequency must agree with what the database
+    holds now (metadata is re-queried inside the locked read, so an object
+    replaced since ``quick_info`` is refused rather than read as something
+    else). For a series, ``first_index`` and ``last_index`` select the range:
+    ``None`` (or the NC index) means the stored endpoint, and an explicit
+    endpoint must lie inside the stored range, which is how a subrange is
+    read. ``obj`` is modified only after the read succeeded: its range is
+    set to what was read and ``data`` holds a new owning buffer.
+    """
+    if not isinstance(obj, FameObject):
+        raise TypeError("do_read expects a FameObject; get one from quick_info or listdb.")
+    if not isinstance(db, FameDatabase):
+        raise TypeError("do_read expects a FameDatabase as its second argument.")
+    with db.operation("read object") as native:
+        info = query_info(native, db.key, obj.name)
+        check_supported_class(info)
+        if (obj.class_code, obj.type_code, obj.frequency) != (
+            info.class_code,
+            info.type_code,
+            info.frequency,
+        ):
+            raise DataValidationError(
+                "The stored object's class, type or frequency differ from this FameObject; "
+                "query it again with quick_info."
+            )
+        index_nc = db.session.sentinels.index_nc
+        first: int | None = None
+        last: int | None = None
+        if info.is_series and not info.is_empty(index_nc):
+            if obj.first_index is not None and obj.first_index != index_nc:
+                first = obj.first_index
+            if obj.last_index is not None and obj.last_index != index_nc:
+                last = obj.last_index
+        elif info.is_series:
+            for endpoint in (obj.first_index, obj.last_index):
+                if endpoint is not None and endpoint != index_nc:
+                    raise DataValidationError("An empty series has no observations to select.")
+        raw = _read_locked(native, db, info, first, last)
+    fill_object(obj, raw, info)
+    return obj
+
+
+def fill_object(obj: FameObject, raw: RawObject, info: FameObject | None = None) -> None:
+    """Store a carrier's range and data on ``obj`` (after a successful read)."""
+    if isinstance(raw, RawSeries):
+        obj.first_index = raw.first_index
+        obj.last_index = raw.first_index if raw.is_empty else raw.last_index
+        obj.data = raw.values
+    else:
+        if info is not None:
+            obj.first_index, obj.last_index = info.first_index, info.last_index
+        obj.data = raw.value
+
+
+def object_from_raw(name: str | bytes, raw: RawObject) -> FameObject:
+    """A ``FameObject`` carrying a converted carrier (the result of ``refame``)."""
+    if isinstance(raw, RawSeries):
+        return FameObject(
+            name,
+            ObjectClass.SERIES,
+            raw.type_code,
+            raw.frequency,
+            raw.first_index,
+            raw.first_index if raw.is_empty else raw.last_index,
+            raw.values,
+        )
+    return FameObject(name, ObjectClass.SCALAR, raw.type_code, FREQUENCY_UNDEFINED, 0, 0, raw.value)
+
+
+def raw_of(obj: FameObject, index_nc: int) -> RawObject:
+    """The validated carrier of a ``FameObject``'s data, or ``DataValidationError``.
+
+    Every check runs here, before any native call: class, kind, frequency,
+    the presence and shape of the data, the range against the data length.
+    """
+    if not isinstance(obj, FameObject):
+        raise TypeError("Expected a FameObject.")
+    check_supported_class(obj)
+    if obj.data is None:
+        raise DataValidationError("The FameObject has no data; read it with do_read first.")
+    if obj.type_code == int(ObjectType.DATE):
+        raise DataValidationError(
+            "A date object is typed by the frequency of its values; pass that frequency as "
+            "the type."
+        )
+    kind = _kind_from_type(obj.type_code)
+    date_frequency = obj.date_frequency
+    if obj.is_scalar:
+        if obj.frequency != FREQUENCY_UNDEFINED:
+            raise DataValidationError("A scalar has the undefined frequency.")
+        return RawScalar(kind, obj.data, date_frequency)
+    if kind == "namelist":
+        raise DataValidationError("A namelist is always a scalar object.")
+    values = obj.data
+    if isinstance(values, (str, bytes)):
+        raise DataValidationError("Series data must be an array or a list of bytes.")
+    try:
+        count = len(values)
+    except TypeError:
+        raise DataValidationError("Series data must be an array or a list of bytes.") from None
+    if count == 0:
+        # A truly empty series stores no first date; the endpoints are ignored.
+        return RawSeries(kind, obj.frequency, index_nc, values, date_frequency)
+    if obj.first_index is None or obj.first_index == index_nc:
+        raise DataValidationError("A series with data needs its first index.")
+    if obj.last_index is not None and obj.last_index != obj.first_index + count - 1:
+        raise DataValidationError("The last index disagrees with the first index and the data.")
+    return RawSeries(kind, obj.frequency, obj.first_index, values, date_frequency)
 
 
 # -- writing -----------------------------------------------------------------
@@ -444,7 +569,7 @@ def _prepare(obj: RawObject) -> Any:
 
 
 def _write_values(
-    native: Any, key: int, name: bytes, obj: RawObject, range_: RangeSpec | None, payload: Any
+    native: Any, key: int, name: bytes, obj: RawObject, range_: FameRange | None, payload: Any
 ) -> None:
     kind = obj.kind
     if isinstance(obj, RawScalar):
@@ -500,16 +625,16 @@ def attribute_codes(basis: Any = None, observed: Any = None) -> tuple[int | None
     return code(basis, Basis, "basis"), code(observed, Observed, "observed")
 
 
-def write_object(
-    database: Database,
+def write_raw(
+    database: FameDatabase,
     name: str | bytes,
     obj: RawObject,
     *,
     replace: bool = False,
-    basis: Any = Basis.DAILY,
+    basis: Any = None,
     observed: Any = None,
 ) -> None:
-    """Create an object and write its data.
+    """Create an object from a carrier and write its data (internal form of ``do_write``).
 
     Name, kind, frequency, attributes, value encodings and buffers are all
     validated before the first native call: an invalid Python input makes no
@@ -522,7 +647,7 @@ def write_object(
     """
     text = object_name(name)
     if not isinstance(obj, (RawScalar, RawSeries)):
-        raise TypeError("write_object expects a RawScalar or RawSeries.")
+        raise TypeError("write_raw expects a RawScalar or RawSeries.")
     if not database.is_writable:
         raise DataValidationError("The database was opened read-only.")
     if isinstance(obj, RawSeries):
@@ -545,7 +670,7 @@ def write_object(
         if replace:
             try:
                 native.delete_object(key, text)
-            except FameError as error:
+            except HLIError as error:
                 if error.status != HNOOBJ:
                     raise
         native.new_object(
@@ -556,44 +681,44 @@ def write_object(
         _write_values(native, key, text, obj, range_, payload)
 
 
-def delete_object(database: Database, name: str | bytes, *, missing_ok: bool = False) -> None:
+def do_write(
+    obj: FameObject,
+    db: FameDatabase,
+    *,
+    replace: bool = True,
+    basis: Any = None,
+    observed: Any = None,
+) -> None:
+    """Create the object in the database and write its data.
+
+    Every check (name, class, kind, frequency, range, attributes, value
+    encodings, buffers) runs before the first native call, so an invalid
+    object never deletes or creates anything. Like the reference, the default
+    deletes an existing object of the same name first. Pass ``replace=False``
+    to refuse an existing name with the library's own status.
+    A replacement is not transactional: a native failure after the deletion
+    leaves the old object gone. ``basis`` and ``observed`` accept attribute
+    members, codes or names (daily basis; observed summed for floating data
+    and undefined otherwise, as the reference writes). Nothing is posted;
+    call ``postdb`` before closing to keep the changes.
+    """
+    if not isinstance(obj, FameObject):
+        raise TypeError("do_write expects a FameObject; use refame(name, value).")
+    if not isinstance(db, FameDatabase):
+        raise TypeError("do_write expects a FameDatabase as its second argument.")
+    raw = raw_of(obj, db.session.sentinels.index_nc)
+    write_raw(db, obj.name, raw, replace=replace, basis=basis, observed=observed)
+
+
+def delete_object(db: FameDatabase, name: str | bytes, *, missing_ok: bool = False) -> None:
+    """Delete an object; ``missing_ok`` ignores the absent-object status. Nothing is posted."""
     text = to_native(name, what="object name")
-    with database.operation("delete object") as native:
+    with db.operation("delete object") as native:
         try:
-            native.delete_object(database.key, text)
-        except FameError as error:
+            native.delete_object(db.key, text)
+        except HLIError as error:
             if not (missing_ok and error.status == HNOOBJ):
                 raise
-
-
-def series(
-    kind: str,
-    frequency: Any,
-    first_index: int,
-    values: Sequence[Any] | np.ndarray,
-    *,
-    date_frequency: Any = None,
-) -> RawSeries:
-    """Build a RawSeries, converting sequences (not arrays) to the exact dtype."""
-    if kind == "string":
-        return RawSeries("string", frequency_code(frequency), first_index, list(values))
-    if isinstance(values, np.ndarray):
-        data = values
-    else:
-        data = np.array(list(values), dtype=_DTYPES[kind])
-    return RawSeries(
-        kind,
-        frequency_code(frequency),
-        first_index,
-        data,
-        None if date_frequency is None else frequency_code(date_frequency),
-    )
-
-
-def scalar(kind: str, value: Any, *, date_frequency: Any = None) -> RawScalar:
-    return RawScalar(
-        kind, value, None if date_frequency is None else frequency_code(date_frequency)
-    )
 
 
 def case_frequency() -> int:

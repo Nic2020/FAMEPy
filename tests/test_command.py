@@ -6,16 +6,16 @@ from pathlib import Path
 import pytest
 
 import famepy
-from famepy import CommandError, ExtendedErrorRetrieval, IncludeError, expand_input, run_command
+from famepy import CommandError, ExtendedErrorRetrieval, IncludeError, expand_input, fame
 from famepy._command import MAX_COMMAND_BYTES
 
 
 def test_command_output_capture_quiet_and_stream(session, tmp_path):
     fake = session._native.fake
-    assert run_command("disp 1", session=session, temp_dir=tmp_path) == b"echo: disp 1\n"
-    assert run_command("disp 2", session=session, quiet=True, temp_dir=tmp_path) == b""
+    assert fame("disp 1", session=session, temp_dir=tmp_path) == b"echo: disp 1\n"
+    assert fame("disp 2", session=session, quiet=True, temp_dir=tmp_path) == b""
     stream = io.BytesIO()
-    run_command("disp 3", session=session, output=stream, temp_dir=tmp_path)
+    fame("disp 3", session=session, output=stream, temp_dir=tmp_path)
     assert stream.getvalue() == b"echo: disp 3\n"
     assert fake.commands[0].startswith(b'output file("') and fake.commands[0].endswith(b'!")')
     assert fake.commands[1] == b"disp 1" and fake.commands[2] == b"output terminal"
@@ -26,7 +26,7 @@ def test_command_output_capture_quiet_and_stream(session, tmp_path):
 def test_failure_restores_output_and_keeps_partial_output_off_message(session, tmp_path):
     fake = session._native.fake
     with pytest.raises(CommandError) as error:
-        run_command("fail 513", session=session, temp_dir=tmp_path)
+        fame("fail 513", session=session, temp_dir=tmp_path)
     assert error.value.status == 513
     assert error.value.output == b"partial output before failure\n"
     assert "partial" not in str(error.value)
@@ -39,7 +39,7 @@ def test_redirect_failure(session, tmp_path):
     fake = session._native.fake
     fake.fail_next["cfmfame"] = 67
     with pytest.raises(CommandError) as error:
-        run_command("disp 1", session=session, temp_dir=tmp_path)
+        fame("disp 1", session=session, temp_dir=tmp_path)
     assert error.value.status == 67 and error.value.output is None
     assert error.value.stage == "redirect" and error.value.restore_status is None
     assert "(redirect)" in str(error.value)
@@ -52,19 +52,19 @@ def test_stages_and_original_error_preservation(session, tmp_path):
     fake = session._native.fake
     fake.refuse_redirect = 513
     with pytest.raises(CommandError) as error:
-        run_command("disp 1", session=session, temp_dir=tmp_path)
+        fame("disp 1", session=session, temp_dir=tmp_path)
     assert error.value.stage == "redirect" and error.value.status == 513
     assert fake.commands == [fake.commands[0]] and fake.commands[0].startswith(b"output file(")
     fake.refuse_redirect = None
     # Payload failure keeps the payload status even when the restoration fails too.
     fake.refuse_restore = 44
     with pytest.raises(CommandError) as error:
-        run_command("fail 513", session=session, temp_dir=tmp_path)
+        fame("fail 513", session=session, temp_dir=tmp_path)
     assert error.value.stage == "command" and error.value.status == 513
     assert error.value.restore_status == 44
     assert error.value.output == b"partial output before failure\n"
     with pytest.raises(CommandError) as error:
-        run_command("disp 1", session=session, temp_dir=tmp_path)
+        fame("disp 1", session=session, temp_dir=tmp_path)
     assert error.value.stage == "restore" and error.value.status == 44
     assert error.value.output == b"echo: disp 1\n"
     assert fake.commands[-1] == b"output terminal"
@@ -87,7 +87,7 @@ def test_output_file_is_created_by_the_library_not_the_package(session, tmp_path
         return original(command)
 
     monkeypatch.setattr(fake, "execute", execute)
-    assert run_command("disp 1", session=session, temp_dir=tmp_path) == b"echo: disp 1\n"
+    assert fame("disp 1", session=session, temp_dir=tmp_path) == b"echo: disp 1\n"
     assert seen == {"existed_before": False, "parent_private": True}
     assert list(tmp_path.iterdir()) == []
     # A library that never created the file yields empty output, not an error.
@@ -101,7 +101,7 @@ def test_output_file_is_created_by_the_library_not_the_package(session, tmp_path
         return original_execute(command)
 
     monkeypatch.setattr(fake, "execute", no_file)
-    assert run_command("disp 1", session=session, temp_dir=tmp_path) == b""
+    assert fame("disp 1", session=session, temp_dir=tmp_path) == b""
     assert list(tmp_path.iterdir()) == []
 
 
@@ -117,21 +117,21 @@ def test_restore_failure_is_reported(session, tmp_path, monkeypatch):
 
     monkeypatch.setattr(fake, "execute", flaky)
     with pytest.raises(CommandError) as error:
-        run_command("disp 1", session=session, temp_dir=tmp_path)
+        fame("disp 1", session=session, temp_dir=tmp_path)
     assert error.value.status == 44 and error.value.output == b"echo: disp 1\n"
 
 
 def test_command_text_policy(session, tmp_path):
     with pytest.raises(famepy.TextEncodingError):
-        run_command("disp café", session=session, temp_dir=tmp_path)
+        fame("disp café", session=session, temp_dir=tmp_path)
     with pytest.raises(ValueError):
-        run_command(
+        fame(
             b"x" * (MAX_COMMAND_BYTES + 1),
             session=session,
             expand_includes=False,
             temp_dir=tmp_path,
         )
-    assert run_command(b"disp raw", session=session, temp_dir=tmp_path) == b"echo: disp raw\n"
+    assert fame(b"disp raw", session=session, temp_dir=tmp_path) == b"echo: disp raw\n"
 
 
 def test_input_expansion_rules(tmp_path):
@@ -180,7 +180,7 @@ def test_input_refusals(tmp_path):
 
 def test_run_command_expands_relative_to_base_dir(session, tmp_path):
     (tmp_path / "inc.inp").write_bytes(b"disp included")
-    result = run_command("input inc", session=session, base_dir=tmp_path, temp_dir=tmp_path)
+    result = fame("input inc", session=session, base_dir=tmp_path, temp_dir=tmp_path)
     assert result == b"echo: disp included\n"  # the fake echoes each non-empty line
     assert not (tmp_path / "inc.inp").read_bytes() != b"disp included"
 
@@ -192,7 +192,7 @@ def test_temp_paths_are_validated_before_redirection(session, tmp_path, monkeypa
         directory = tmp_path / name  # not created: such names are refused before any use
         monkeypatch.setattr(module.tempfile, "mkdtemp", lambda d=directory, **k: str(d))
         with pytest.raises(famepy.TextEncodingError):
-            run_command("disp 1", session=session, temp_dir=tmp_path)
+            fame("disp 1", session=session, temp_dir=tmp_path)
         assert session._native.fake.commands == []
 
 
@@ -245,7 +245,7 @@ def test_extended_error_is_captured_before_output_restoration(session, tmp_path,
 
     monkeypatch.setattr(fake, "execute", execute)
     with pytest.raises(CommandError) as error:
-        run_command("fail 513", session=session, temp_dir=tmp_path)
+        fame("fail 513", session=session, temp_dir=tmp_path)
     assert error.value.extended_text == b"synthetic failure for fail 513"
     assert seen[0][-1] == b"fail 513"  # captured before "output terminal" was issued
     assert session.extended_error_text() == b"synthetic failure for fail 513"
@@ -255,4 +255,4 @@ def test_extended_error_is_captured_before_output_restoration(session, tmp_path,
 
 
 def test_display_sums_are_evaluated_by_the_fake(session, tmp_path):
-    assert run_command("display 2+2", session=session, temp_dir=tmp_path) == b"4\n"
+    assert fame("display 2+2", session=session, temp_dir=tmp_path) == b"4\n"

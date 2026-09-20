@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from canonical import read, scalar_object, series_object, write
 from fake_native import (
     FINITE_SENTINELS,
     PRIVATE_MARKER,
@@ -19,7 +20,7 @@ from fake_native import (
 )
 
 import famepy
-from famepy import bridge, validation
+from famepy import validation
 from famepy._wildcard import native_listing_count
 from famepy.validation import _groups, _report
 from famepy.validation._process import (
@@ -73,21 +74,21 @@ def test_string_sentinels_are_binary_and_survive_every_route(tmp_path):
     session = famepy.Session(native=fake).initialize()
     path = tmp_path / "bin.db"
     values = [b"", SENTINELS.string_nc, SENTINELS.string_na, SENTINELS.string_nd, b"\xff\x00"[:1]]
-    with famepy.open_database(path, "create", session=session) as database:
-        famepy.write_object(database, "s", famepy.series("string", "case", 1, values))
-        famepy.write_object(database, "sc", famepy.scalar("string", SENTINELS.string_nd))
-        database.post()
-    with famepy.open_database(path, session=session) as database:
-        got = famepy.read_object(database, "s")
-        assert got.values == values
-        assert famepy.classify_by_sentinel(got.values, "string", SENTINELS).tolist() == [
+    with famepy.opendb(path, "create", session=session) as database:
+        famepy.do_write(series_object("s", "string", "case", 1, values), database)
+        famepy.do_write(scalar_object("sc", "string", SENTINELS.string_nd), database)
+        famepy.postdb(database)
+    with famepy.opendb(path, session=session) as database:
+        got = read(database, "s")
+        assert got.data == values
+        assert famepy.classify_by_sentinel(got.data, "string", SENTINELS).tolist() == [
             0,
             1,
             2,
             3,
             0,
         ]
-        assert famepy.read_object(database, "sc").value == SENTINELS.string_nd
+        assert read(database, "sc").data == SENTINELS.string_nd
     manifest = {
         "database": str(path),
         "objects": [
@@ -409,40 +410,40 @@ def test_mode_fixtures_keep_the_existing_database_and_the_new_path_apart(tmp_pat
 
 @pytest.fixture
 def mixed(session, tmp_path):
-    database = famepy.open_database(tmp_path / "mixed.db", "create", session=session)
+    database = famepy.opendb(tmp_path / "mixed.db", "create", session=session)
     first = 24240
-    famepy.write_object(database, "m_a", famepy.series("precision", "monthly", first, np.zeros(2)))
-    famepy.write_object(
-        database, "m_b", famepy.series("numeric", "monthly", first, np.zeros(1, np.float32))
+    famepy.do_write(series_object("m_a", "precision", "monthly", first, np.zeros(2)), database)
+    famepy.do_write(
+        series_object("m_b", "numeric", "monthly", first, np.zeros(1, np.float32)), database
     )
-    famepy.write_object(
-        database, "q_a", famepy.series("precision", "quarterly_december", 100, np.zeros(2))
+    famepy.do_write(
+        series_object("q_a", "precision", "quarterly_december", 100, np.zeros(2)), database
     )
-    famepy.write_object(database, "c_s", famepy.series("string", "case", 1, [b"x"]))
-    famepy.write_object(database, "sc", famepy.scalar("precision", 1.0))
-    famepy.write_object(database, "st", famepy.scalar("string", b"t"))
+    famepy.do_write(series_object("c_s", "string", "case", 1, [b"x"]), database)
+    famepy.do_write(scalar_object("sc", "precision", 1.0), database)
+    famepy.do_write(scalar_object("st", "string", b"t"), database)
     yield database
-    database.close()
+    famepy.closedb(database)
 
 
 def _names(database, pattern="?", **filters):
-    return sorted(info.name_text for info in famepy.list_objects(database, pattern, **filters))
+    return sorted(info.name_text for info in famepy.listdb(database, pattern, **filters))
 
 
 def test_frequency_filter_returns_exact_sets(mixed):
     assert _names(mixed) == ["C_S", "M_A", "M_B", "Q_A", "SC", "ST"]
-    assert _names(mixed, frequencies="monthly") == ["M_A", "M_B"]
-    assert _names(mixed, frequencies="quarterly_december") == ["Q_A"]
-    assert _names(mixed, frequencies=["monthly", "case"]) == ["C_S", "M_A", "M_B"]
-    assert _names(mixed, frequencies="monthly,case") == ["C_S", "M_A", "M_B"]
-    assert _names(mixed, frequencies=129) == ["M_A", "M_B"]
-    assert _names(mixed, frequencies=[129, "case"]) == ["C_S", "M_A", "M_B"]
-    assert _names(mixed, frequencies="undefined") == ["SC", "ST"]
-    assert _names(mixed, frequencies="monthly", classes="scalar") == []
-    assert _names(mixed, frequencies="monthly", types="numeric") == ["M_B"]
-    assert _names(mixed, "m?", frequencies="monthly") == ["M_A", "M_B"]
-    assert _names(mixed, frequencies=[]) == ["C_S", "M_A", "M_B", "Q_A", "SC", "ST"]
-    assert _names(mixed, frequencies="daily") == []
+    assert _names(mixed, freq="monthly") == ["M_A", "M_B"]
+    assert _names(mixed, freq="quarterly_december") == ["Q_A"]
+    assert _names(mixed, freq=["monthly", "case"]) == ["C_S", "M_A", "M_B"]
+    assert _names(mixed, freq="monthly,case") == ["C_S", "M_A", "M_B"]
+    assert _names(mixed, freq=129) == ["M_A", "M_B"]
+    assert _names(mixed, freq=[129, "case"]) == ["C_S", "M_A", "M_B"]
+    assert _names(mixed, freq="undefined") == ["SC", "ST"]
+    assert _names(mixed, freq="monthly", class_="scalar") == []
+    assert _names(mixed, freq="monthly", type="numeric") == ["M_B"]
+    assert _names(mixed, "m?", freq="monthly") == ["M_A", "M_B"]
+    assert _names(mixed, freq=[]) == ["C_S", "M_A", "M_B", "Q_A", "SC", "ST"]
+    assert _names(mixed, freq="daily") == []
 
 
 @pytest.mark.parametrize("value", ["quarterly", "monthly;drop", "fortnightly", 7, True, "annual"])
@@ -450,14 +451,14 @@ def test_frequency_filter_refuses_families_and_invalid_input(mixed, value):
     fake = mixed.session._native.fake
     fake.calls.clear()
     with pytest.raises(ValueError):
-        famepy.list_objects(mixed, frequencies=value)
+        famepy.listdb(mixed, freq=value)
     assert fake.calls == []  # refused before any native call
 
 
 def test_frequency_option_is_still_set_and_normalized(mixed):
     fake = mixed.session._native.fake
     fake.commands.clear()
-    famepy.list_objects(mixed, frequencies=["case", "monthly"])
+    famepy.listdb(mixed, freq=["case", "monthly"])
     options = [name for name in fake.calls if name == "cfmsopt"]
     assert len(options) >= 5
     # After the listing every option is back to ON, including the frequency selection.
@@ -476,8 +477,8 @@ def test_frequency_option_is_still_set_and_normalized(mixed):
 def test_option_errors_are_not_hidden(mixed):
     fake = mixed.session._native.fake
     fake.fail_next["cfmsopt"] = 67
-    with pytest.raises(famepy.FameError) as error:
-        famepy.list_objects(mixed, frequencies="monthly")
+    with pytest.raises(famepy.HLIError) as error:
+        famepy.listdb(mixed, freq="monthly")
     assert error.value.status == 67
 
 
@@ -724,7 +725,7 @@ jw["jkw_datets"] = bridge.DateSeries(qq(2020, 1), [yy(2021), yy(2022)])
 jw["jkw_vec"] = ["x", "y"]
 jw["jkw_empty"] = TSeries(qq(1995, 1), np.empty(0))
 assert set(JULIA_KINDS) <= set(jw)
-bridge.write_workspace(julia_path, jw, mode="overwrite", empty="reference")
+famepy.writefame(julia_path, jw, mode="overwrite", empty="reference")
 session.finalize()
 result = {
     "group": "julia",
@@ -762,7 +763,7 @@ def _julia_context(tmp_path, monkeypatch):
     fake = make_fake(persist=True)
     session = famepy.Session(native=fake).initialize()
     # The bridge group's database exists before the differential runs.
-    bridge.write_scalar(tmp_path / "python.db", "sc", 2.5, mode="create")
+    write(tmp_path / "python.db", "sc", 2.5, mode="create")
     recorder = _report.Recorder()
     julia = {"executable": sys.executable, "project": str(stand_in)}
     ctx = _groups.Context(session, tmp_path, recorder, lambda e: [], 60.0, julia, {})
@@ -818,3 +819,41 @@ def test_julia_differential_reads_a_result_file_not_stdout(tmp_path, monkeypatch
             ("julia_run", "fail", note),
         ], mode
     session.finalize()
+
+
+@pytest.mark.parametrize("fault", [None, "old_default", "ignore_opt_out", "mutate_then_refuse"])
+def test_matrix_gates_default_replacement_and_opt_out(tmp_path, monkeypatch, fault):
+    session = famepy.Session(native=make_fake(persist=True))
+    recorder = _report.Recorder()
+    ctx = _groups.Context(session, tmp_path, recorder, lambda extra: [], 5.0, None, {})
+    # This test isolates the replacement gates. Cross-process verification has
+    # separate end-to-end coverage and is not needed to inject a Python API fault.
+    monkeypatch.setattr(ctx, "verify_in_new_process", lambda *args: None)
+    original = famepy.do_write
+
+    def faulty(obj, db, **kwargs):
+        if fault == "old_default":
+            kwargs.setdefault("replace", False)
+        elif fault in ("ignore_opt_out", "mutate_then_refuse") and kwargs.get("replace") is False:
+            kwargs["replace"] = True
+            original(obj, db, **kwargs)
+            if fault == "mutate_then_refuse":
+                raise famepy.HLIError(905)
+            return
+        return original(obj, db, **kwargs)
+
+    monkeypatch.setattr(famepy, "do_write", faulty)
+    _groups.group_raw_matrix(ctx)
+    cases = {case.id: case for case in recorder.cases}
+    gates = {"replace_existing", "replace_value", "replace_opt_out", "replace_opt_out_unchanged"}
+    assert gates <= set(_groups.RAW_MATRIX_REQUIRED)
+    if fault is None:
+        assert all(cases[name].status == "pass" for name in gates)
+    elif fault == "old_default":
+        assert cases["replace_existing"].status == "fail"
+    elif fault == "ignore_opt_out":
+        assert cases["replace_opt_out"].status == "fail"
+        assert cases["replace_opt_out_unchanged"].status == "fail"
+    else:
+        assert cases["replace_opt_out"].status == "pass"
+        assert cases["replace_opt_out_unchanged"].status == "fail"

@@ -41,7 +41,7 @@ from famepy._data import case_frequency, classify_by_sentinel, value_type_code
 from famepy._errors import HNOOBJ
 from famepy._text import TextEncodingError
 
-from ._manifest import _read, manifest_object, verify_case_ids
+from ._manifest import _read, _value, _write, manifest_object, verify_case_ids
 from ._process import read_result, reserve_result, run_child
 from ._report import Case
 
@@ -113,7 +113,7 @@ def expected_bytes(fixture: TextFixture) -> Any:
 
 
 def write_form(fixture: TextFixture) -> Any:
-    """The value handed to ``write_value``: the text, or a case ``StringSeries``."""
+    """The value handed to ``refame``: the text, or a case ``StringSeries``."""
     if fixture.is_vector:
         from tsecon import MIT, Unit
 
@@ -195,25 +195,25 @@ def group_text(ctx: Context) -> None:
 
     r.expect_error(
         "refuse_invalid_policy",
-        lambda: bridge.write_value(absent, "X", "text", mode="create", text="latin-1"),
+        lambda: _write(absent, "X", "text", mode="create", text="latin-1"),
         (ValueError,),
     )
     r.equal("refuse_invalid_policy_no_file", absent.exists(), False)
 
-    with famepy.open_database(path, "create", session=session) as database:
+    with famepy.opendb(path, "create", session=session) as database:
         r.expect_error(
             "refuse_nonascii_default",
-            lambda: bridge.write_value(database, "REFUSED_A", "caf\xe9"),
+            lambda: _write(database, "REFUSED_A", "caf\xe9"),
             (TextEncodingError,),
         )
         r.expect_error(
             "refuse_surrogate",
-            lambda: bridge.write_value(database, "REFUSED_B", "\ud800", text="utf-8"),
+            lambda: _write(database, "REFUSED_B", "\ud800", text="utf-8"),
             (TextEncodingError,),
         )
         r.expect_error(
             "refuse_nul",
-            lambda: bridge.write_value(database, "REFUSED_C", "a\0b", text="utf-8"),
+            lambda: _write(database, "REFUSED_C", "a\0b", text="utf-8"),
             (TextEncodingError,),
         )
 
@@ -223,7 +223,7 @@ def group_text(ctx: Context) -> None:
                 try:
                     famepy.quick_info(database, name)
                     present.append(name)
-                except famepy.FameError as error:
+                except famepy.HLIError as error:
                     if error.status != HNOOBJ:
                         raise
             return present
@@ -235,30 +235,30 @@ def group_text(ctx: Context) -> None:
 
         r.check(
             "write_default_ascii",
-            lambda: bridge.write_value(database, "TXT_ASCII_DEFAULT", TEXT_CORPUS[0].value),
+            lambda: _write(database, "TXT_ASCII_DEFAULT", TEXT_CORPUS[0].value),
         )
         r.expect(
             "raw_default_ascii",
-            lambda: _read(database, "TXT_ASCII_DEFAULT").value,
+            lambda: _read(database, "TXT_ASCII_DEFAULT").data,
             expected_bytes(TEXT_CORPUS[0]),
         )
         carrier = bridge.Text("{caf\xe9}")
         r.check(
             "text_carrier_utf8",
-            lambda: bridge.write_value(database, "TXT_CARRIER", carrier, text="utf-8"),
+            lambda: _write(database, "TXT_CARRIER", carrier, text="utf-8"),
         )
         r.expect(
             "text_carrier_utf8_read",
             lambda: [
                 famepy.quick_info(database, "TXT_CARRIER").kind,
-                bridge.read_value(database, "TXT_CARRIER", text="utf-8") == carrier.value,
+                _value(database, "TXT_CARRIER", text="utf-8") == carrier.value,
             ],
             ["string", True],
         )
         _missing_cases(ctx, database)
         _invalid_bytes_cases(ctx, database)
         _workspace_cases(ctx, database)
-        database.post()
+        famepy.postdb(database)
 
     manifest = {
         "database": str(path),
@@ -279,12 +279,12 @@ def _encoded(fixture: TextFixture) -> Any:
     return fixture.value.encode("utf-8")
 
 
-def _write_and_read(ctx: Context, database: famepy.Database, fixture: TextFixture) -> None:
+def _write_and_read(ctx: Context, database: famepy.FameDatabase, fixture: TextFixture) -> None:
     r = ctx.recorder
     label, name = fixture.label, fixture.name
     expected = expected_bytes(fixture)
     value = write_form(fixture)
-    if not r.ok(f"write:{label}", lambda: bridge.write_value(database, name, value, text="utf-8")):
+    if not r.ok(f"write:{label}", lambda: _write(database, name, value, text="utf-8")):
         for prefix in ("raw", "utf8", "bytes", "ascii"):
             r.blocked(f"{prefix}:{label}", "object not created")
         return
@@ -292,17 +292,17 @@ def _write_and_read(ctx: Context, database: famepy.Database, fixture: TextFixtur
     def raw_values() -> Any:
         raw = _read(database, name)
         if fixture.is_vector:
-            codes = classify_by_sentinel(raw.values, "string", ctx.session.sentinels)
+            codes = classify_by_sentinel(raw.data, "string", ctx.session.sentinels)
             return [
                 None if code != MISSING_NORMAL else item
-                for item, code in zip(raw.values, codes, strict=True)
+                for item, code in zip(raw.data, codes, strict=True)
             ]
-        return raw.value
+        return raw.data
 
     r.expect(f"raw:{label}", raw_values, expected)
 
     def decoded(policy: str) -> Any:
-        read = bridge.read_value(database, name, text=policy)
+        read = _value(database, name, text=policy)
         return list(read.values) if fixture.is_vector else read
 
     python_value = fixture.value
@@ -326,36 +326,38 @@ def _first_case() -> Any:
     return MIT(Unit(), 1)
 
 
-def _missing_cases(ctx: Context, database: famepy.Database) -> None:
+def _missing_cases(ctx: Context, database: famepy.FameDatabase) -> None:
     """Missing observations are classified by their sentinel bytes, never decoded."""
     r = ctx.recorder
     sentinels = ctx.session.sentinels
     series = bridge.StringSeries(_first_case(), ["caf\xe9", None, "x"])
     r.check(
         "missing_written",
-        lambda: bridge.write_value(database, "TXT_MISSING", series, text="utf-8"),
+        lambda: _write(database, "TXT_MISSING", series, text="utf-8"),
     )
 
     def read_missing() -> Any:
         raw = _read(database, "TXT_MISSING")
-        codes = classify_by_sentinel(raw.values, "string", sentinels).tolist()
-        back = bridge.read_value(database, "TXT_MISSING", text="utf-8")
+        codes = classify_by_sentinel(raw.data, "string", sentinels).tolist()
+        back = _value(database, "TXT_MISSING", text="utf-8")
         return [codes, list(back.values) == ["caf\xe9", None, "x"]]
 
     r.expect("missing_before_decode", read_missing, [[0, MISSING_NC, 0], True])
 
     def categories() -> Any:
-        raw = famepy.series(
+        raw = famepy.FameObject(
+            "TXT_CATEGORIES",
+            "series",
             "string",
             case_frequency(),
             1,
-            [sentinels.string_nc, sentinels.string_na, sentinels.string_nd, b"caf\xc3\xa9"],
+            data=[sentinels.string_nc, sentinels.string_na, sentinels.string_nd, b"caf\xc3\xa9"],
         )
-        famepy.write_object(database, "TXT_CATEGORIES", raw)
-        back = bridge.read_value(database, "TXT_CATEGORIES", text="utf-8")
+        famepy.do_write(raw, database)
+        back = _value(database, "TXT_CATEGORIES", text="utf-8")
         strict_failed = False
         try:
-            bridge.read_value(database, "TXT_CATEGORIES", text="utf-8", missing="strict")
+            _value(database, "TXT_CATEGORIES", text="utf-8", missing="strict")
         except bridge.MissingValueError:
             strict_failed = True
         return [list(back.values) == [None, None, None, "caf\xe9"], strict_failed]
@@ -363,36 +365,38 @@ def _missing_cases(ctx: Context, database: famepy.Database) -> None:
     r.expect("missing_categories_utf8", categories, [True, True])
 
 
-def _invalid_bytes_cases(ctx: Context, database: famepy.Database) -> None:
+def _invalid_bytes_cases(ctx: Context, database: famepy.FameDatabase) -> None:
     """Stored bytes that are not UTF-8 are refused by the decoder, never replaced."""
     r = ctx.recorder
     invalid = b"caf\xe9"  # Latin-1 bytes; not UTF-8, not ASCII
     r.permit(invalid)
-    famepy.write_object(database, "TXT_INVALID", famepy.scalar("string", invalid))
+    famepy.do_write(
+        famepy.FameObject("TXT_INVALID", "scalar", "string", "undefined", data=invalid), database
+    )
     r.expect_error(
         "invalid_utf8_refused",
-        lambda: bridge.read_value(database, "TXT_INVALID", text="utf-8"),
+        lambda: _value(database, "TXT_INVALID", text="utf-8"),
         (TextEncodingError,),
     )
     r.expect(
         "invalid_utf8_bytes_readable",
-        lambda: bridge.read_value(database, "TXT_INVALID", text="bytes"),
+        lambda: _value(database, "TXT_INVALID", text="bytes"),
         invalid,
     )
     r.expect_error(
         "invalid_utf8_ascii_refused",
-        lambda: bridge.read_value(database, "TXT_INVALID", text="ascii"),
+        lambda: _value(database, "TXT_INVALID", text="ascii"),
         (TextEncodingError,),
     )
 
 
-def _workspace_cases(ctx: Context, database: famepy.Database) -> None:
+def _workspace_cases(ctx: Context, database: famepy.FameDatabase) -> None:
     """Contained writes isolate the value that cannot be encoded; reads decode per policy."""
     r = ctx.recorder
     data = {"ws_ok": "caf\xe9 au lait", "ws_bad": "\ud800", "ws_plain": "plain"}
 
     def contained() -> Any:
-        report = bridge.write_workspace_report(database, data, text="utf-8")
+        report = bridge.writefame_report(database, data, text="utf-8")
         return [
             sorted(report.written),
             [(f.name, f.error_type) for f in report.failures],
@@ -407,31 +411,31 @@ def _workspace_cases(ctx: Context, database: famepy.Database) -> None:
     r.expect(
         "workspace_report_written",
         lambda: [
-            _read(database, "WS_OK").value,
-            _read(database, "WS_PLAIN").value,
+            _read(database, "WS_OK").data,
+            _read(database, "WS_PLAIN").data,
         ],
         [b"caf\xc3\xa9 au lait", b"plain"],
     )
     r.expect(
         "workspace_utf8_read",
         lambda: (
-            dict(bridge.read_workspace(database, "ws_ok", "ws_plain", text="utf-8"))
+            dict(famepy.readfame(database, "ws_ok", "ws_plain", text="utf-8"))
             == {"ws_ok": "caf\xe9 au lait", "ws_plain": "plain"}
         ),
         True,
     )
     r.expect_error(
         "workspace_ascii_read_fails",
-        lambda: bridge.read_workspace(database, "ws_ok", "ws_plain"),
+        lambda: famepy.readfame(database, "ws_ok", "ws_plain"),
         (TextEncodingError,),
     )
 
     def fallback() -> Any:
-        report = bridge.read_workspace_report(database, "ws_ok", "ws_plain", raw_fallback=True)
+        report = bridge.readfame_report(database, "ws_ok", "ws_plain", raw_fallback=True)
         return [
             list(report.raw),
             [f.name for f in report.failures],
-            report.workspace["ws_ok"].value,
+            report.workspace["ws_ok"].data,
             report.workspace["ws_plain"],
         ]
 
@@ -714,7 +718,7 @@ def adopt_julia_text(
                 )
                 r.fact(f"{case}:{label}", record, note=note)
     # Python reads what the reference wrote: exact bytes, then the decoded text.
-    with famepy.open_database(julia_path, "readonly", session=ctx.session) as database:
+    with famepy.opendb(julia_path, "readonly", session=ctx.session) as database:
         for fixture in TEXT_CORPUS:
             if fixture.reference == PYTHON_ONLY:
                 continue
@@ -723,12 +727,12 @@ def adopt_julia_text(
 
             def raw_read(name: str = name, vector: bool = fixture.is_vector) -> Any:
                 raw = _read(database, name)
-                return list(raw.values) if vector else raw.value
+                return list(raw.data) if vector else raw.data
 
             r.expect(f"python_reads_julia_raw:{label}", raw_read, expected, note=qualification)
 
             def utf8_read(name: str = name, vector: bool = fixture.is_vector) -> Any:
-                read = bridge.read_value(database, name, text="utf-8")
+                read = _value(database, name, text="utf-8")
                 return list(read.values) if vector else read
 
             def utf8_equal(utf8_read: Any = utf8_read, value: Any = fixture.value) -> bool:

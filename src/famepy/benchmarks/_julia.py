@@ -6,7 +6,8 @@ The Julia script mirrors the comparable Python scenarios only: the same
 daily from 2000-01-03 for ``few_large`` and ``missing_density``) and
 missing densities, timing the reference's ``writefame``/``readfame`` of a
 whole workspace, which is the boundary of the Python
-``write_workspace``/``read_workspace`` phases. The date and string
+``writefame``/``readfame`` phases (the ``write_workspace``/``read_workspace``
+phase labels). The date and string
 scenarios are not mirrored because their Python fixtures contain missing
 observations the reference script would have to replace.
 

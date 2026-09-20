@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import famepy
-from famepy import FameError, LibraryNotFoundError, check_status
+from famepy import HLIError, LibraryNotFoundError, check_status
 from famepy._binding import Binding
 from famepy._discovery import discover
 from famepy._errors import UnsupportedPlatformError
@@ -19,7 +19,7 @@ from famepy._runtime import Runtime
 
 @pytest.mark.parametrize("status", [13, 67, 513, -1, 2**31 - 1])
 def test_error_status_retained_without_payload(status):
-    with pytest.raises(FameError) as error:
+    with pytest.raises(HLIError) as error:
         check_status(status)
     assert error.value.status == status
     assert str(status) in str(error.value)
@@ -124,7 +124,7 @@ def test_fake_backend_status_and_signature():
     class Backend:
         cfmopdb = Function()
 
-    with pytest.raises(FameError, match="13"):
+    with pytest.raises(HLIError, match="13"):
         Binding(Backend()).call(
             "cfmopdb", ct.byref(ct.c_int32()), ct.create_string_buffer(b"synthetic"), 1
         )

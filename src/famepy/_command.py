@@ -170,7 +170,7 @@ def _remove_quietly(path: Path) -> None:
         pass
 
 
-def run_command(
+def fame(
     command: str | bytes,
     *,
     session: Session | None = None,
@@ -181,6 +181,9 @@ def run_command(
     temp_dir: str | os.PathLike[str] | None = None,
 ) -> bytes:
     """Execute one FAME command and return its captured output bytes.
+
+    The reference's ``fame(io, command)`` form is the ``output`` keyword;
+    there is no string-macro form. ``INPUT`` statements are expanded first.
 
     Output goes to the temporary file for the whole operation and is returned
     (or written to ``output``). ``quiet`` discards it. On failure a CommandError

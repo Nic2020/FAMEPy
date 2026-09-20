@@ -43,10 +43,14 @@ inside the calendar at both scales: the standard `missing_density`
 fixture spans 200 000 days from 2000-01-03 (to 2547), whereas 200 000
 months would end far beyond year 9999, outside the range the library
 accepts; the offline tests pin both endpoints and the cross-language
-index. Conversion (`to_fame`/`from_fame`) is timed apart from
-the native writes and reads, posting apart from writing, and the workspace
-forms apart from the single-object forms, so that Python conversion cost,
-native I/O and posting are distinguishable.
+index. Conversion (`refame`/`unfame`) is timed apart from
+the native writes and reads (`do_write`, and `quick_info` followed by
+`do_read`), posting apart from writing, and the workspace forms
+(`writefame`/`readfame`) apart from the single-object forms, so that
+Python conversion cost, native I/O and posting are distinguishable. The
+phase labels in the report (`convert_to_fame`, `read_raw`, `read_bridge`,
+`write_workspace`, ...) are fixed identifiers and did not change with the
+API names.
 
 Every scenario verifies, outside its timed regions, that what it read back
 is what it wrote (exact float bits, dates, strings, first dates; for the
@@ -59,7 +63,7 @@ A failed measurement carries bounded diagnostics only: the exception
 class name, the numeric native status when the error has one, the
 operation from the package's own native-boundary method names, and the
 phase label in progress from the scenario's fixed phase set (for example
-`FameError`, status 9, `write_precisions`, `write_density_00`). No
+`HLIError`, status 9, `write_precisions`, `write_density_00`). No
 message text, extended bytes, path or free label is exported; a worker
 record with any other field or an out-of-range value contributes no
 diagnostics at all (`diagnostics: rejected`), and a failure record never
@@ -86,7 +90,7 @@ coordinating process.
   allocation, and `--profile` the `cProfile` statistics
   (`<scratch>/warm-<scenario>/work/profile.prof`, local only).
 - Cold (`"cold"`): a fresh interpreter process per scenario that times
-  `initialize` and the first database open separately and then runs a
+  initialization and the first database open separately and then runs a
   single timed pass without instrumentation. "Cold" means a fresh process;
   the file-system cache is not cleared and the report says so.
   `--no-cold` skips these runs.
@@ -121,8 +125,8 @@ With `--julia` and `--julia-project` the harness also runs a FAME.jl script
 on the same host, under the same worker protocol, on the scenarios whose
 fixtures and phase boundaries are equivalent: `many_small`, `few_large` and
 `missing_density`, timing the reference's `writefame` and `readfame` of the
-whole workspace, which is the boundary of the Python `write_workspace` and
-`read_workspace` phases (database opened and closed inside on both sides).
+whole workspace, which is the boundary of the Python `writefame` and
+`readfame` phases (database opened and closed inside on both sides).
 The reference's workspace write catches per-object errors and logs them
 instead of raising, so the script verifies every `readfame` result,
 including the untimed warm-up pass, outside the timed regions against
@@ -194,3 +198,11 @@ two hosts. Timings from the fake backend or the C shim are never vendor
 performance, and a schema-valid report is not proof of vendor performance
 either: the `vendor_timing` flag and the library identity say what was
 measured.
+
+
+The canonical `do_write` default performs a delete attempt before creation,
+matching FAME.jl, including when the name is new. Instrumented direct-write
+phases therefore count one additional native call per object compared with
+0.1.0rc1. This is part of the workload being measured; the benchmark does not
+silently opt out of replacement to retain the old count. Historical timings
+remain tied to their original candidate.

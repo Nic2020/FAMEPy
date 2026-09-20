@@ -21,7 +21,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from ._abi import GLOBAL_TYPES, GLOBALS, PRESENCE_ONLY, SIGNATURES, C, FameRange, S
+from ._abi import GLOBAL_TYPES, GLOBALS, PRESENCE_ONLY, SIGNATURES, C, RangeStruct, S
 from ._binding import Binding
 from ._constants import NAME_CAPACITY, NAMELIST_ALL
 from ._errors import DataValidationError, check_status
@@ -34,7 +34,7 @@ MAX_EXTENDED_ERROR_BYTES = 2**16
 
 
 @dataclass(frozen=True)
-class RangeSpec:
+class FameRange:
     """A validated FAME range: frequency code plus inclusive 64-bit endpoints."""
 
     frequency: int
@@ -58,8 +58,8 @@ class RangeSpec:
     def length(self) -> int:
         return self.last - self.first + 1
 
-    def to_ctypes(self) -> FameRange:
-        return FameRange(self.frequency, self.first, self.last)
+    def to_ctypes(self) -> RangeStruct:
+        return RangeStruct(self.frequency, self.first, self.last)
 
 
 @dataclass(frozen=True)
@@ -121,39 +121,39 @@ class NativeInterface(Protocol):
     ) -> None: ...
     def delete_object(self, key: int, name: bytes) -> None: ...
     def get_precisions(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None: ...
     def get_numerics(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None: ...
     def get_booleans(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None: ...
     def get_dates(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None: ...
     def get_strings(
-        self, key: int, name: bytes, range_: RangeSpec | None, count: int
+        self, key: int, name: bytes, range_: FameRange | None, count: int
     ) -> list[bytes]: ...
     def write_precisions(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, values: np.ndarray
     ) -> None: ...
     def write_numerics(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, values: np.ndarray
     ) -> None: ...
     def write_booleans(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, values: np.ndarray
     ) -> None: ...
     def write_dates(
         self,
         key: int,
         name: bytes,
-        range_: RangeSpec | None,
+        range_: FameRange | None,
         type_code: int,
         values: np.ndarray,
     ) -> None: ...
     def write_strings(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: Sequence[bytes]
+        self, key: int, name: bytes, range_: FameRange | None, values: Sequence[bytes]
     ) -> None: ...
     def get_namelist(self, key: int, name: bytes) -> bytes: ...
     def write_namelist(self, key: int, name: bytes, value: bytes) -> None: ...
@@ -200,7 +200,7 @@ def check_buffer(
     return values
 
 
-def _range_argument(range_: RangeSpec | None, count: int) -> tuple[Any, Any]:
+def _range_argument(range_: FameRange | None, count: int) -> tuple[Any, Any]:
     """Return (ctypes range or None, owner) and enforce scalar/series lengths."""
     if range_ is None:
         if count != 1:
@@ -406,7 +406,7 @@ class CtypesNative:
         function: str,
         key: int,
         name: bytes,
-        range_: RangeSpec | None,
+        range_: FameRange | None,
         values: np.ndarray,
         dtype: Any,
         ctype: Any,
@@ -428,29 +428,29 @@ class CtypesNative:
         del owner, checked
 
     def get_precisions(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None:
         self._bulk(
             "fame_get_precisions", key, name, range_, out, np.float64, ct.c_double, writable=True
         )
 
     def get_numerics(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None:
         self._bulk(
             "fame_get_numerics", key, name, range_, out, np.float32, ct.c_float, writable=True
         )
 
     def get_booleans(
-        self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray
     ) -> None:
         self._bulk("fame_get_booleans", key, name, range_, out, np.int32, ct.c_int32, writable=True)
 
-    def get_dates(self, key: int, name: bytes, range_: RangeSpec | None, out: np.ndarray) -> None:
+    def get_dates(self, key: int, name: bytes, range_: FameRange | None, out: np.ndarray) -> None:
         self._bulk("fame_get_dates", key, name, range_, out, np.int64, ct.c_int64, writable=True)
 
     def write_precisions(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, values: np.ndarray
     ) -> None:
         self._bulk(
             "fame_write_precisions",
@@ -464,14 +464,14 @@ class CtypesNative:
         )
 
     def write_numerics(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, values: np.ndarray
     ) -> None:
         self._bulk(
             "fame_write_numerics", key, name, range_, values, np.float32, ct.c_float, writable=False
         )
 
     def write_booleans(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: np.ndarray
+        self, key: int, name: bytes, range_: FameRange | None, values: np.ndarray
     ) -> None:
         self._bulk(
             "fame_write_booleans", key, name, range_, values, np.int32, ct.c_int32, writable=False
@@ -481,7 +481,7 @@ class CtypesNative:
         self,
         key: int,
         name: bytes,
-        range_: RangeSpec | None,
+        range_: FameRange | None,
         type_code: int,
         values: np.ndarray,
     ) -> None:
@@ -500,7 +500,7 @@ class CtypesNative:
     # -- strings ---------------------------------------------------------
 
     def get_strings(
-        self, key: int, name: bytes, range_: RangeSpec | None, count: int
+        self, key: int, name: bytes, range_: FameRange | None, count: int
     ) -> list[bytes]:
         count = _int32(count, "string count")
         if count < 1 or count > MAX_OBSERVATIONS:
@@ -538,7 +538,7 @@ class CtypesNative:
         return result
 
     def write_strings(
-        self, key: int, name: bytes, range_: RangeSpec | None, values: Sequence[bytes]
+        self, key: int, name: bytes, range_: FameRange | None, values: Sequence[bytes]
     ) -> None:
         items = list(values)
         if not items:
@@ -722,7 +722,7 @@ __all__ = [
     "MAX_STRING_BYTES",
     "CtypesNative",
     "NativeInterface",
-    "RangeSpec",
+    "FameRange",
     "Sentinels",
     "WildcardEntry",
     "check_buffer",
